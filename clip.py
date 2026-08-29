@@ -44,14 +44,32 @@ def download_raw(video_id):
     # Secret disimpan sbg BASE64 (1 baris) biar gak rusak saat di-copy dari Notepad
     # (Notepad sering ubah TAB jadi spasi / CRLF jadi aneh). Decode -> tulis LF murni.
     import base64
-    b64 = os.environ["YT_COOKIES_TXT"].strip()
+    b64 = os.environ.get("YT_COOKIES_TXT", "").strip()
+    if not b64:
+        raise SystemExit("YT_COOKIES_TXT kosong -> set secret (base64 dari yt_cookies.txt)")
     try:
         raw = base64.b64decode(b64).decode("utf-8")
+        decoded_base64 = True
     except Exception:
         # fallback: anggap sudah plaintext (strip CR saja)
-        raw = os.environ["YT_COOKIES_TXT"].replace("\r\n", "\n").replace("\r", "\n")
+        raw = b64.replace("\r\n", "\n").replace("\r", "\n")
+        decoded_base64 = False
     raw = raw.replace("\r\n", "\n").replace("\r", "\n")
     cookies.write_text(raw, newline="\n", encoding="utf-8")
+
+    # ---- DIAGNOSTIK: validasi sebelum yt-dlp biar error jelas di CI ----
+    lines = [l for l in raw.split("\n") if l.strip()]
+    has_tab = any("\t" in l for l in lines[1:])
+    first = lines[0] if lines else "(kosong)"
+    log(f"[cookies] base64_decode={decoded_base64} baris={len(lines)} "
+        f"ada_tab={has_tab} header='{first[:40]}'")
+    if not first.startswith("# Netscape HTTP Cookie File"):
+        raise SystemExit("COOKIES SALAH: header bukan '# Netscape HTTP Cookie File'. "
+                         "Pastikan YT_COOKIES_TXT = base64 dari yt_cookies.txt (bukan isi mentah).")
+    if not has_tab:
+        raise SystemExit("COOKIES SALAH: tidak ada TAB (field dipisah spasi?). "
+                         "Notepad ubah TAB->spasi. Pakai base64, atau copy via editor lain.")
+
     # Pin versi (requirements.txt). Cookies = login akun pemilik channel (video private).
     # node + remote component wajib buat solve YouTube signature challenge (2024+).
     cmd = [
