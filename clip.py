@@ -260,11 +260,46 @@ def mark_done(video_id):
     sf.write_text(json.dumps(data))
 
 
+# ---------------------------------------------------------------- POLL (cron fallback)
+def poll_latest():
+    """Cek video terbaru di channel via videos.list (butuh YT_READ_TOKEN,
+    scope youtube.readonly). Return video_id pertama, atau None."""
+    import requests
+    tok = os.environ.get("YT_READ_TOKEN")
+    if not tok:
+        log("[poll] YT_READ_TOKEN kosong -> skip (pakai WebSub atau manual input)")
+        return None
+    # dapat access token dari refresh token (pakai client upload yg sama)
+    t = requests.post("https://oauth2.googleapis.com/token", data={
+        "client_id": os.environ["YT_UPLOAD_CLIENT"],
+        "client_secret": os.environ["YT_UPLOAD_SECRET"],
+        "refresh_token": tok,
+        "grant_type": "refresh_token",
+    }).json()
+    access = t.get("access_token")
+    if not access:
+        log("[poll] gagal token baca"); return None
+    r = requests.get("https://www.googleapis.com/youtube/v3/search",
+                     params={"channelId": os.environ["YT_CHANNEL_ID"],
+                             "part": "id", "order": "date", "maxResults": 1,
+                             "type": "video"},
+                     headers={"Authorization": f"Bearer {access}", "Accept": "application/json"})
+    r.raise_for_status()
+    items = r.json().get("items", [])
+    if not items:
+        return None
+    return items[0]["id"]["videoId"]
+
+
 # ---------------------------------------------------------------- MAIN
 def main():
     video_id = os.environ.get("VIDEO_ID")
     if not video_id:
-        raise SystemExit("VIDEO_ID kosong")
+        # cron fallback: cek video terbaru
+        video_id = poll_latest()
+    if not video_id:
+        log("VIDEO_ID kosong (gak ada WebSub/manual/poll) -> keluar bersih")
+        return
     if already_done(video_id):
         log("sudah di-clip, skip"); return
     raw = download_raw(video_id)

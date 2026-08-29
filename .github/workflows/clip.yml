@@ -3,10 +3,15 @@ name: yt-clip
 on:
   repository_dispatch:
     types: [video_published]
-  # Fallback: poll channel tiap 1 jam (jaga-jaga WebSub mati)
+  # Fallback: poll channel tiap 1 jam (jaga-jaga WebSub mati).
+  # Perlu YT_READ_TOKEN (scope youtube.readonly) -> lihat clip.py poll().
   schedule:
     - cron: "0 * * * *"
   workflow_dispatch:
+    inputs:
+      video_id:
+        description: "YouTube video ID (dari URL watch?v=XXXX) untuk test manual"
+        required: false
 
 permissions:
   contents: write   # buat simpan state.json (anti double-clip)
@@ -32,13 +37,15 @@ jobs:
 
       - name: Download raw + clip + upload
         env:
-          VIDEO_ID: ${{ github.event.client_payload.video_id }}
+          # video_id: dari dispatch (WebSub) ATAU manual input, ATAU poll terbaru
+          VIDEO_ID: ${{ github.event.client_payload.video_id || github.event.inputs.video_id }}
           YT_CHANNEL_ID: ${{ secrets.YT_CHANNEL_ID }}
           YT_COOKIES_TXT: ${{ secrets.YT_COOKIES_TXT }}
           YTDLP_JS_RUNTIME: node
           YT_UPLOAD_CLIENT: ${{ secrets.YT_UPLOAD_CLIENT }}
           YT_UPLOAD_SECRET: ${{ secrets.YT_UPLOAD_SECRET }}
           YT_UPLOAD_TOKEN: ${{ secrets.YT_UPLOAD_TOKEN }}
+          YT_READ_TOKEN: ${{ secrets.YT_READ_TOKEN }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
