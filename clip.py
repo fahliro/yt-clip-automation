@@ -93,9 +93,13 @@ def transcribe(path):
     with open(path, "rb") as f:
         r = requests.post(url, headers={"Authorization": f"Bearer {os.environ['GROQ_API_KEY']}"},
                           files={"file": f},
-                          data={"model": "whisper-large-v3", "response_format": "verbose_json",
-                                "timestamp_granularities": "word"})
-        r.raise_for_status()
+                          data={"model": "whisper-large-v3",
+                                "response_format": "verbose_json",
+                                "timestamp_granularities[]": "word"})
+        if not r.ok:
+            # tangkap body error biar jelas di CI (groq kasih pesan 400-nya)
+            log(f"[groq] HTTP {r.status_code}: {r.text[:500]}")
+            r.raise_for_status()
     return r.json()
 
 
