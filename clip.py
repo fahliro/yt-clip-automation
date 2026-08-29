@@ -41,8 +41,16 @@ def run(cmd):
 def download_raw(video_id):
     out = WORKDIR / f"{video_id}.mp4"
     cookies = WORKDIR / "cookies.txt"
-    # Pastikan LF murni: strip \r (secret bisa saja ter-commit/CRLF dari Windows).
-    raw = os.environ["YT_COOKIES_TXT"].replace("\r\n", "\n").replace("\r", "\n")
+    # Secret disimpan sbg BASE64 (1 baris) biar gak rusak saat di-copy dari Notepad
+    # (Notepad sering ubah TAB jadi spasi / CRLF jadi aneh). Decode -> tulis LF murni.
+    import base64
+    b64 = os.environ["YT_COOKIES_TXT"].strip()
+    try:
+        raw = base64.b64decode(b64).decode("utf-8")
+    except Exception:
+        # fallback: anggap sudah plaintext (strip CR saja)
+        raw = os.environ["YT_COOKIES_TXT"].replace("\r\n", "\n").replace("\r", "\n")
+    raw = raw.replace("\r\n", "\n").replace("\r", "\n")
     cookies.write_text(raw, newline="\n", encoding="utf-8")
     # Pin versi (requirements.txt). Cookies = login akun pemilik channel (video private).
     # node + remote component wajib buat solve YouTube signature challenge (2024+).
