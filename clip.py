@@ -25,6 +25,8 @@ WORKDIR.mkdir(parents=True, exist_ok=True)
 SILENCE_GAP = 0.4      # detik; gap antar kata > ini = dianggap silence, dibuang
 DEFAULT_FILLERS = ["um", "yah", "gitu", "eh", "ya", "wah", "nih", "kan", "loh"]
 MAX_CLIPS = 100        # cap videos.insert per hari
+# ID test (hardcode buat debug lokal/CI manual). Prod: override via env VIDEO_ID / WebSub / poll.
+TEST_VIDEO_ID = "YVLYNuhKZpc"
 
 def log(m): print(f"[clip] {m}", flush=True)
 
@@ -339,8 +341,9 @@ def main():
         # cron fallback: cek video terbaru
         video_id = poll_latest()
     if not video_id:
-        log("VIDEO_ID kosong (gak ada WebSub/manual/poll) -> keluar bersih")
-        return
+        # debug: hardcode ID test biar gampang jalanin tanpa set env
+        video_id = TEST_VIDEO_ID
+        log(f"VIDEO_ID kosong -> pakai TEST_VIDEO_ID={video_id}")
     if already_done(video_id):
         log("sudah di-clip, skip"); return
     raw = download_raw(video_id)

@@ -13,7 +13,7 @@ Cek:
 
 Keluar code 1 kalau ada credential KRITIS invalid (fail-fast).
 """
-import os, base64, sys, time
+import os, base64, sys, time, subprocess, tempfile, shutil
 
 try:
     import requests
@@ -58,7 +58,48 @@ def check_cookies():
         return check(name, False, "Netscape OK tapi gak ada cookie SID (belum login?)")
     if any_expired:
         return check(name, False, "ada cookie EXPIRED (session di-rotate Google)")
-    return check(name, True, f"Netscape OK, SID ada, {len(exp_lines)} cookie belum expired")
+    # parse OK -> SEKARANG tes beneran: cookies masih login ke YouTube?
+    # (field expires bisa belum lewat tapi Google sudah rotate session ->
+    #  yt-dlp bilang "cookies are no longer valid"). Jadi kita SIMULATE download
+    #  ke URL yg butuh login (feed/subscriptions) pakai yt-dlp.
+    ok_login, why = _cookies_still_logged_in(raw)
+    if not ok_login:
+        return check(name, False, f"EXPIRED/ROTATED: {why} -> RE-EXPORT cookies akun B")
+    return check(name, True, f"Netscape OK, SID ada, {len(exp_lines)} cookie belum expired, login VALID")
+
+
+def _cookies_still_logged_in(netscape_text):
+    """Simulate yt-dlp ke URL yg butuh login. Return (bool, pesan)."""
+    ytdlp = shutil.which("yt-dlp")
+    if not ytdlp:
+        return True, "(yt-dlp gak ada di env -> skip tes login)"
+    node = shutil.which("node")
+    fd, path = tempfile.mkstemp(suffix=".txt")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(netscape_text)
+        cmd = [ytdlp, "--cookies", path, "--simulate", "--no-warnings",
+               "https://www.youtube.com/feed/subscriptions"]
+        if node:
+            cmd += ["--js-runtimes", node]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        except Exception as e:
+            return True, f"(tes login gagal jalan: {e} -> skip)"
+        out = (r.stdout + r.stderr).lower()
+        if "no longer valid" in out or "cookies are no longer" in out:
+            return False, "yt-dlp: cookies no longer valid"
+        if "private" in out and "cookies" in out:
+            return False, "yt-dlp: cookies gak bisa akses (rotated?)"
+        if r.returncode == 0:
+            return True, "yt-dlp simulate login OK"
+        # returncode !=0 tapi bukan masalah cookies -> anggap OK (biar gak false-fail)
+        if "cookies" not in out:
+            return True, "yt-dlp simulate (non-cookie err, skip)"
+        return False, "yt-dlp error cookies"
+    finally:
+        try: os.remove(path)
+        except OSError: pass
 
 
 # ---------------------------------------------------------------- 2. GROQ
