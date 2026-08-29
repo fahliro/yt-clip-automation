@@ -1,0 +1,56 @@
+name: yt-clip
+
+on:
+  repository_dispatch:
+    types: [video_published]
+  # Fallback: poll channel tiap 1 jam (jaga-jaga WebSub mati)
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write   # buat simpan state.json (anti double-clip)
+
+jobs:
+  clip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install -U pip
+          pip install -r requirements.txt
+          # ffmpeg & node sudah ada di runner ubuntu-latest; cek:
+          ffmpeg -version | head -1
+          node --version
+
+      - name: Download raw + clip + upload
+        env:
+          VIDEO_ID: ${{ github.event.client_payload.video_id }}
+          YT_CHANNEL_ID: ${{ secrets.YT_CHANNEL_ID }}
+          YT_COOKIES_TXT: ${{ secrets.YT_COOKIES_TXT }}
+          YTDLP_JS_RUNTIME: node
+          YT_UPLOAD_CLIENT: ${{ secrets.YT_UPLOAD_CLIENT }}
+          YT_UPLOAD_SECRET: ${{ secrets.YT_UPLOAD_SECRET }}
+          YT_UPLOAD_TOKEN: ${{ secrets.YT_UPLOAD_TOKEN }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL }}
+          STATE_FILE: state.json
+        run: python clip.py
+
+      - name: Save state (anti double-clip)
+        if: always()
+        run: |
+          git config user.email "bot@github.com"
+          git config user.name "clip-bot"
+          git add state.json || true
+          git commit -m "update state" || true
+          git push || true

@@ -1,0 +1,19 @@
+name = "yt-clip-webhook"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+# Cron: tiap Minggu 00:00 UTC -> renew WebSub subscription (lease Google ~10 hari,
+# renew 7 hari kasih buffer 3 hari sebelum kedaluwarsa).
+[triggers]
+crons = ["0 0 * * 0"]
+
+# Semua secret diisi via: wrangler secret put NAMA
+# (jangan commit ke repo)
+[vars]
+CHANNEL_ID = "GANTI_DENGAN_CHANNEL_ID_KAMU"   # bisa di-hardcode aman (bukan rahasia)
+HUB_CALLBACK_PATH = "/webhook"                # path endpoint di worker ini
+
+# Secret (wrangler secret put):
+#   GH_OWNER   = username GitHub
+#   GH_REPO    = nama repo
+#   GH_PAT     = Personal Access Token (repo:write) buat panggil repository_dispatch

@@ -1,0 +1,3 @@
+# Pin versi teruji. Update manual kalau YouTube break yt-dlp (lihat README).
+yt-dlp==2026.08.19
+requests>=2.31.0
