@@ -122,14 +122,18 @@ def check_youtube():
     access = r.json().get("access_token")
     if not access:
         return check(name, False, "gak dapat access_token")
-    # cek channel id valid
+    # cek channel id valid (opsional). Token upload cuma punya scope youtube.upload,
+    # jadi channels.list (butuh youtube.readonly) bisa 403 -> itu WAJAR, gak gagal.
     if ch:
         cr = requests.get("https://www.googleapis.com/youtube/v3/channels",
                           params={"id": ch, "part": "id", "mine": "true"},
                           headers={"Authorization": f"Bearer {access}"}, timeout=20)
         if cr.status_code == 200 and cr.json().get("items"):
             return check(name, True, f"token OK, channel {ch} bisa diakses")
-        return check(name, False, f"channel {ch} gak bisa diakses (punya token?): {cr.text[:120]}")
+        if cr.status_code == 403:
+            # scope terbatas (youtube.upload saja) -> token valid utk upload, OK
+            return check(name, True, f"token OK (scope upload-only, skip cek channel {ch})")
+        return check(name, False, f"channel {ch} gak bisa diakses: {cr.text[:120]}")
     return check(name, True, "token OK (YT_CHANNEL_ID kosong, skip cek channel)")
 
 
