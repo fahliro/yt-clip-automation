@@ -274,7 +274,7 @@ def concat_parts(parts, idx):
 
 # ---------------------------------------------------------------- 5. UPLOAD
 def upload_video(path, title, description):
-    import requests
+    import requests, time
     tok = requests.post("https://oauth2.googleapis.com/token", data={
         "client_id": os.environ["YT_UPLOAD_CLIENT"],
         "client_secret": os.environ["YT_UPLOAD_SECRET"],
@@ -283,22 +283,36 @@ def upload_video(path, title, description):
     }).json()
     access = tok["access_token"]
     meta = json.dumps({
-        "snippet": {"title": title, "description": description,
+        "snippet": {"title": title[:100], "description": (description or "")[:4900],
                     "channelId": os.environ["YT_CHANNEL_ID"]},
         "status": {"privacyStatus": "public"},
     }).encode()
-    with open(path, "rb") as f:
-        r = requests.post(
-            "https://www.googleapis.com/upload/youtube/v3/videos?part=snippet,status&uploadType=multipart",
-            headers={"Authorization": f"Bearer {access}"},
-            files={"metadata": ("meta", meta, "application/json; charset=UTF-8"),
-                   "media": (path.name, f, "video/*")},
-            timeout=600,
-        )
-        r.raise_for_status()
-    vid = r.json()["id"]
-    log(f"uploaded: https://youtu.be/{vid}")
-    return vid
+    last_err = None
+    for attempt in range(3):
+        try:
+            with open(path, "rb") as f:
+                r = requests.post(
+                    "https://www.googleapis.com/upload/youtube/v3/videos?part=snippet,status&uploadType=multipart",
+                    headers={"Authorization": f"Bearer {access}"},
+                    files={"metadata": ("meta", meta, "application/json; charset=UTF-8"),
+                           "media": (path.name, f, "video/*")},
+                    timeout=600,
+                )
+                r.raise_for_status()
+            vid = r.json()["id"]
+            log(f"uploaded: https://youtu.be/{vid}")
+            return vid
+        except requests.HTTPError as e:
+            last_err = e
+            body = ""
+            try: body = e.response.text[:400]
+            except Exception: pass
+            log(f"[upload] attempt {attempt+1} gagal HTTP {e.response.status_code if e.response else '?'} body={body}")
+            if e.response and e.response.status_code == 400:
+                # 400 sering transient (rate/processing) -> retry dgn jeda
+                time.sleep(20 * (attempt + 1)); continue
+            raise
+    raise last_err or RuntimeError("upload gagal")
 
 
 # ---------------------------------------------------------------- STATE
