@@ -102,7 +102,19 @@ def transcribe(path):
             # tangkap body error biar jelas di CI (groq kasih pesan 400-nya)
             log(f"[groq] HTTP {r.status_code}: {r.text[:500]}")
             r.raise_for_status()
-    return r.json()
+    data = r.json()
+    # Groq/OpenAI verbose_json: "words" bersarang di dalam "segments", BUKAN top-level.
+    # Pipeline butuh list words flat (buat caption + LLM) -> flatten biar caption kebakar.
+    if not data.get("words"):
+        flat = []
+        for seg in data.get("segments", []):
+            for w in seg.get("words", []):
+                flat.append({"word": w.get("word", ""),
+                             "start": float(w.get("start", 0)),
+                             "end": float(w.get("end", 0))})
+        data["words"] = flat
+        log(f"[groq] flatten words dari segments: {len(flat)} kata")
+    return data
 
 
 # ---------------------------------------------------------------- 3. LLM PILIH
