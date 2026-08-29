@@ -84,8 +84,9 @@ def check_llm():
     base = os.environ.get("LLM_BASE_URL", "").rstrip("/")
     key = os.environ.get("LLM_API_KEY", "").strip()
     model = os.environ.get("LLM_MODEL", "").strip()
-    if not (base and key and model):
-        return check(name, False, "base_url/api_key/model ada yang KOSONG")
+    missing = [n for n, v in [("LLM_BASE_URL", base), ("LLM_API_KEY", key), ("LLM_MODEL", model)] if not v]
+    if missing:
+        return check(name, False, f"KOSONG: {', '.join(missing)} (cek secret/variable di GitHub)")
     if requests is None:
         return check(name, True, "skip (requests gak ada, di CI ada)")
     r = requests.post(f"{base}/chat/completions",
