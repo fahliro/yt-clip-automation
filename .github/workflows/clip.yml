@@ -45,6 +45,19 @@ jobs:
           node --version
           yt-dlp --version
 
+      - name: Preflight - cek semua credential
+        env:
+          YT_CHANNEL_ID: ${{ secrets.YT_CHANNEL_ID }}
+          YT_COOKIES_TXT: ${{ secrets.YT_COOKIES_TXT }}
+          YT_UPLOAD_CLIENT: ${{ secrets.YT_UPLOAD_CLIENT }}
+          YT_UPLOAD_SECRET: ${{ secrets.YT_UPLOAD_SECRET }}
+          YT_UPLOAD_TOKEN: ${{ secrets.YT_UPLOAD_TOKEN }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL }}
+        run: python preflight.py
+
       - name: Download raw + clip + upload
         env:
           # video_id: dari dispatch (WebSub) ATAU manual input, ATAU poll terbaru
