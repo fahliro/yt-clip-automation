@@ -9,3 +9,6 @@ __pycache__/
 part_*.mp4
 clip_*.mp4
 concat_*.txt
+
+# cookies base64 (SECRET - jangan di-commit)
+yt_cookies_b64.txt
