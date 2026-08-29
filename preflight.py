@@ -56,16 +56,16 @@ def check_cookies():
     any_expired = any(0 < int(l.split("\t")[4]) < now for l in exp_lines)
     if not has_sid:
         return check(name, False, "Netscape OK tapi gak ada cookie SID (belum login?)")
+    # NOTE: beberapa cookie YouTube (SIDCC dll) punya field expires SUDAH LEWAT tapi
+    # masih VALID selama session browser hidup -> jangan di-fail di sini. Yang jadi
+    # otoritas kebenaran login adalah tes download 1 detik di bawah, bukan field expires.
     if any_expired:
-        return check(name, False, "ada cookie EXPIRED (session di-rotate Google)")
+        log(f"  (note) ada {sum(1 for l in exp_lines if 0 < int(l.split(chr(9))[4]) < now)} cookie expires lewat -> tetap tes download")
     # parse OK -> SEKARANG tes beneran: cookies masih login ke YouTube?
-    # (field expires bisa belum lewat tapi Google sudah rotate session ->
-    #  yt-dlp bilang "cookies are no longer valid"). Jadi kita SIMULATE download
-    #  ke URL yg butuh login (feed/subscriptions) pakai yt-dlp.
     ok_login, why = _cookies_still_logged_in(raw)
     if not ok_login:
         return check(name, False, f"EXPIRED/ROTATED: {why} -> RE-EXPORT cookies akun B")
-    return check(name, True, f"Netscape OK, SID ada, {len(exp_lines)} cookie belum expired, login VALID")
+    return check(name, True, f"Netscape OK, SID ada, {len(exp_lines)} cookie, login VALID (download 1s)")
 
 
 def _cookies_still_logged_in(netscape_text):
