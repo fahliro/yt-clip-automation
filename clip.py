@@ -134,22 +134,31 @@ def pick_segments(transcript):
         + "\n".join(chunks)[:14000]
     )
 
-    r = requests.post(
-        f"{os.environ['LLM_BASE_URL']}/chat/completions",
-        headers={"Authorization": f"Bearer {os.environ['LLM_API_KEY']}",
-                 "Content-Type": "application/json"},
-        json={"model": os.environ["LLM_MODEL"], "messages": [
-            {"role": "system", "content": "Output JSON saja tanpa markdown."},
-            {"role": "user", "content": transcript_for_llm}]},
-        timeout=120,
-    )
-    r.raise_for_status()
+    base = os.environ.get("LLM_BASE_URL", "").rstrip("/")
+    try:
+        r = requests.post(
+            f"{base}/chat/completions",
+            headers={"Authorization": f"Bearer {os.environ['LLM_API_KEY']}",
+                     "Content-Type": "application/json"},
+            json={"model": os.environ["LLM_MODEL"], "messages": [
+                {"role": "system", "content": "Output JSON saja tanpa markdown."},
+                {"role": "user", "content": transcript_for_llm}]},
+            timeout=120,
+        )
+        if not r.ok:
+            log(f"[llm] HTTP {r.status_code} url={base}/chat/completions body={r.text[:300]}")
+            r.raise_for_status()
+    except Exception as e:
+        log(f"[llm] error: {e} -> fallback potong 45s")
+        return [{"start": i, "end": min(i + 45, words[-1]["end"]), "score": 5,
+                 "reason": "fallback-llm-error", "fillers": DEFAULT_FILLERS}
+                for i in range(0, int(words[-1]["end"]), 45)]
     content = re.sub(r"```(?:json)?", "", r.json()["choices"][0]["message"]["content"]).strip().strip("`")
     try:
         segs = json.loads(content)
     except Exception:
         log(f"LLM gagal parse: {content[:400]}")
-        segs = [{"start": i, "end": min(i+45, words[-1]["end"]), "score": 5,
+        segs = [{"start": i, "end": min(i + 45, words[-1]["end"]), "score": 5,
                  "reason": "fallback", "fillers": DEFAULT_FILLERS}
                 for i in range(0, int(words[-1]["end"]), 45)]
     for s in segs:
