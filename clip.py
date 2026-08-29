@@ -231,17 +231,18 @@ def cut_span(raw_path, s, e, words, idx, i):
     ass = WORKDIR / f"cap_{idx:02d}_{i:02d}.ass"
     if words:
         build_ass(words, ass)
-        sub = f",subtitles={ass}"
+        # complex filtergraph: 2 input ([0:v] dipakai 2x) -> butuh -filter_complex
+        fc = (f"[0:v]scale=1080:-1,boxblur=20[bg];"
+              f"[0:v]scale=1080:-1[fg];"
+              f"[bg][fg]overlay=(W-w)/2:(H-h)/2[ov];"
+              f"[ov]subtitles={ass},format=yuv420p[v]")
     else:
-        sub = ""
-    # 9:16 fit-width + blur background (screen tutorial, tanpa wajah)
-    vf = (
-        f"[0:v]scale=1080:-1,boxblur=20[bg];"
-        f"[0:v]scale=1080:-1[fg];"
-        f"[bg][fg]overlay=(W-w)/2:(H-h)/2{sub},format=yuv420p"
-    )
+        fc = (f"[0:v]scale=1080:-1,boxblur=20[bg];"
+              f"[0:v]scale=1080:-1[fg];"
+              f"[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p[v]")
     run(["ffmpeg", "-y", "-ss", f"{s:.2f}", "-i", str(raw_path), "-t", f"{dur:.2f}",
-         "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+         "-filter_complex", fc, "-map", "[v]", "-map", "0:a?",
+         "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
          "-c:a", "aac", "-b:a", "128k", str(out)])
     return out
 

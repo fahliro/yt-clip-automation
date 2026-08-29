@@ -69,7 +69,8 @@ def check_cookies():
 
 
 def _cookies_still_logged_in(netscape_text):
-    """Simulate yt-dlp ke URL yg butuh login. Return (bool, pesan)."""
+    """Simulate yt-dlp ke VIDEO test (bukan feed/subscriptions yg lambat/hang).
+    Return (bool, pesan)."""
     ytdlp = shutil.which("yt-dlp")
     if not ytdlp:
         return True, "(yt-dlp gak ada di env -> skip tes login)"
@@ -78,12 +79,17 @@ def _cookies_still_logged_in(netscape_text):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(netscape_text)
+        # probe video test spesifik (cepat, gak crawl feed) -> kalau cookies invalid,
+        # yt-dlp langsung error "cookies are no longer valid". timeout 60s biar gak hang.
+        test_url = "https://www.youtube.com/watch?v=YVLYNuhKZpc"
         cmd = [ytdlp, "--cookies", path, "--simulate", "--no-warnings",
-               "https://www.youtube.com/feed/subscriptions"]
+               "--no-playlist", "--dump-json", test_url]
         if node:
             cmd += ["--js-runtimes", node]
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        except subprocess.TimeoutExpired:
+            return True, "(tes login timeout 60s -> skip, jangan hang pipeline)"
         except Exception as e:
             return True, f"(tes login gagal jalan: {e} -> skip)"
         out = (r.stdout + r.stderr).lower()
