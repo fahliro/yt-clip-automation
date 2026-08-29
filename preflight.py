@@ -69,8 +69,10 @@ def check_cookies():
 
 
 def _cookies_still_logged_in(netscape_text):
-    """Simulate yt-dlp ke VIDEO test (bukan feed/subscriptions yg lambat/hang).
-    Return (bool, pesan)."""
+    """TES LOGIN BENERAN: download 1 detik video test (bukan --simulate!).
+    --simulate cuma ambil METADATA yg bisa didapat dari watch page meski cookies
+    rotated -> false-positive. Download riil butuh player extraction -> kalau cookies
+    rotated, yt-dlp langsung error 'cookies are no longer valid'. Return (bool, pesan)."""
     ytdlp = shutil.which("yt-dlp")
     if not ytdlp:
         return True, "(yt-dlp gak ada di env -> skip tes login)"
@@ -79,17 +81,17 @@ def _cookies_still_logged_in(netscape_text):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(netscape_text)
-        # probe video test spesifik (cepat, gak crawl feed) -> kalau cookies invalid,
-        # yt-dlp langsung error "cookies are no longer valid". timeout 60s biar gak hang.
+        # download 1 detik audio saja (cepat, paksa player extraction -> tes login riil)
         test_url = "https://www.youtube.com/watch?v=YVLYNuhKZpc"
-        cmd = [ytdlp, "--cookies", path, "--simulate", "--no-warnings",
-               "--no-playlist", "--dump-json", test_url]
+        cmd = [ytdlp, "--cookies", path, "-f", "ba",
+               "--download-sections", "*00:00-00:01",
+               "--no-warnings", "--no-playlist", "-o", "/dev/null", test_url]
         if node:
             cmd += ["--js-runtimes", node]
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
         except subprocess.TimeoutExpired:
-            return True, "(tes login timeout 60s -> skip, jangan hang pipeline)"
+            return True, "(tes login timeout 90s -> skip, jangan hang pipeline)"
         except Exception as e:
             return True, f"(tes login gagal jalan: {e} -> skip)"
         out = (r.stdout + r.stderr).lower()
@@ -98,10 +100,9 @@ def _cookies_still_logged_in(netscape_text):
         if "private" in out and "cookies" in out:
             return False, "yt-dlp: cookies gak bisa akses (rotated?)"
         if r.returncode == 0:
-            return True, "yt-dlp simulate login OK"
-        # returncode !=0 tapi bukan masalah cookies -> anggap OK (biar gak false-fail)
+            return True, "yt-dlp download 1s login OK"
         if "cookies" not in out:
-            return True, "yt-dlp simulate (non-cookie err, skip)"
+            return True, "yt-dlp (non-cookie err, skip)"
         return False, "yt-dlp error cookies"
     finally:
         try: os.remove(path)
