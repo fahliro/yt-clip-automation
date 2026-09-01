@@ -184,8 +184,10 @@ def pick_segments(transcript):
 
 # ---------------------------------------------------------------- 4a. CAPTION
 def build_ass(words, out_path):
+    # Font: pakai DejaVu Sans (built-in di Ubuntu runner GitHub Actions).
+    # Arial sering gak ada di Linux -> ffmpeg skip render tanpa error, subtitle kosong.
     # warna: &H00FFFFFF = putih; outline &H00000000 = hitam; Bold=1; Align=2 bawah-tengah
-    style = ("Style: Default,Arial,48,&H00FFFFFF,&H000000FF,&H00000000,1,0,0,0,100,100,0,0,2,20,20,20,1")
+    style = ("Style: Default,DejaVu Sans,48,&H00FFFFFF,&H000000FF,&H00000000,1,0,0,0,100,100,0,0,2,20,20,20,1")
     lines = [
         "[Script Info]", "ScriptType: v4.00+", "PlayResX: 1080", "PlayResY: 1920", "",
         "[V4+ Styles]",
@@ -243,12 +245,17 @@ def cut_span(raw_path, s, e, words, idx, i):
     ass = WORKDIR / f"cap_{idx:02d}_{i:02d}.ass"
     if words:
         build_ass(words, ass)
+        # Log: pastikan ASS punya Dialogue entries, bukan cuma header
+        n_dlg = sum(1 for ln in ass.read_text(encoding="utf-8").splitlines()
+                    if ln.startswith("Dialogue:"))
+        log(f"[caption] {ass.name}: {n_dlg} dialogue lines")
         # complex filtergraph: 2 input ([0:v] dipakai 2x) -> butuh -filter_complex
         fc = (f"[0:v]scale=1080:-1,boxblur=20[bg];"
               f"[0:v]scale=1080:-1[fg];"
               f"[bg][fg]overlay=(W-w)/2:(H-h)/2[ov];"
-              f"[ov]subtitles={ass},format=yuv420p[v]")
+              f"[ov]subtitles={ass}:force_style='FontName=DejaVu Sans,FontSize=22,PrimaryColour=&H00FFFFFF&,OutlineColour=&H00000000&,BorderStyle=1,Outline=3,Alignment=2',format=yuv420p[v]")
     else:
+        log(f"[caption] part_{idx:02d}_{i:02d}: kosong (no words in span)")
         fc = (f"[0:v]scale=1080:-1,boxblur=20[bg];"
               f"[0:v]scale=1080:-1[fg];"
               f"[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p[v]")
