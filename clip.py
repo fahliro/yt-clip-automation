@@ -631,6 +631,115 @@ def save_uploaded(youtube_id, raw_video_id, title, thumb_path):
     sf.write_text(json.dumps(data, indent=2))
 
 
+# ---------------------------------------------------------------- 5b. META UPLOAD
+# Cross-post Reels ke Instagram + Facebook via Meta Graph API (official).
+# - Facebook: /<page-id>/videos (page access token, pages_manage_posts)
+# - Instagram: /<ig-user-id>/media (container) -> publish (instagram_content_publish)
+#
+# ENV yang dibutuhkan (GitHub Secrets):
+#   META_ACCESS_TOKEN     Long-lived Page access token (60 hari, refresh manual)
+#   META_FB_PAGE_ID       Facebook Page ID tempat upload
+#   META_IG_USER_ID       Instagram Business User ID
+#   META_IG_HASHTAG       Default hashtag (mis. "#shorts" + niche)
+#
+# Setup lengkap: https://developers.facebook.com/docs/video-api/guides/reels/
+def _meta_get_long_token():
+    """Ambil long-lived Page access token dari env (atau refresh kalau ada)."""
+    tok = os.environ.get("META_ACCESS_TOKEN", "").strip()
+    if not tok:
+        log("[meta] META_ACCESS_TOKEN kosong -> skip"); return None
+    return tok
+
+
+def upload_to_facebook_reels(clip_path, title, description):
+    """Upload Reels ke Facebook Page via Graph API /{page-id}/videos.
+    Returns: video_id (FB) atau None kalau gagal/skip.
+    """
+    tok = _meta_get_long_token()
+    page_id = os.environ.get("META_FB_PAGE_ID", "").strip()
+    if not tok or not page_id:
+        log("[meta-fb] skip: token/page_id kosong"); return None
+    try:
+        with open(clip_path, "rb") as f:
+            r = requests.post(
+                f"https://graph-video.facebook.com/v22.0/{page_id}/videos",
+                params={"access_token": tok, "title": title[:255],
+                        "description": (description or "")[:5000],
+                        "published": "true"},
+                files={"source": (pathlib.Path(clip_path).name, f, "video/mp4")},
+                timeout=600,
+            )
+        if r.ok:
+            vid = r.json().get("id")
+            log(f"[meta-fb] uploaded: https://facebook.com/{page_id}/videos/{vid}")
+            return vid
+        log(f"[meta-fb] gagal: HTTP {r.status_code} body={r.text[:300]}")
+    except Exception as e:
+        log(f"[meta-fb] error: {e}")
+    return None
+
+
+def upload_to_instagram_reels(clip_path, title, description):
+    """Upload Reels ke Instagram Business via Graph API 2-step container pattern.
+    Returns: media_id (IG) atau None kalau gagal/skip.
+    Flow:
+      1. POST /{ig-user-id}/media (video_url, caption, media_type=REELS)
+      2. POST /{ig-user-id}/media_publish (creation_id)
+    Note: media harus sudah di-host di URL publik (IG tidak terima upload multipart).
+    Workaround: pakai staged upload via Facebook dulu (DONE), lalu set IG
+    source_url ke URL FB (Graph API support ini, since v18+).
+    """
+    tok = _meta_get_long_token()
+    ig_user_id = os.environ.get("META_IG_USER_ID", "").strip()
+    fb_vid = os.environ.get("META_LAST_FB_VIDEO_ID", "").strip()  # di-set sebelumnya
+    if not tok or not ig_user_id or not fb_vid:
+        log("[meta-ig] skip: token/ig_user_id/fb_video_id kosong"); return None
+    # Step 1: container
+    try:
+        hashtag = os.environ.get("META_IG_HASHTAG", "#shorts #reels")
+        caption = (description or title) + "\n\n" + hashtag
+        r = requests.post(
+            f"https://graph.facebook.com/v22.0/{ig_user_id}/media",
+            params={"access_token": tok, "media_type": "REELS",
+                    "video_url": f"https://facebook.com/{os.environ['META_FB_PAGE_ID']}/videos/{fb_vid}",
+                    "caption": caption[:2200], "share_to_feed": "true"},
+            timeout=120,
+        )
+        if not r.ok:
+            log(f"[meta-ig] container gagal: HTTP {r.status_code} body={r.text[:300]}")
+            return None
+        creation_id = r.json().get("id")
+        if not creation_id:
+            log(f"[meta-ig] no creation_id: {r.text[:200]}"); return None
+        log(f"[meta-ig] container created: {creation_id}")
+        # Step 2: publish
+        r2 = requests.post(
+            f"https://graph.facebook.com/v22.0/{ig_user_id}/media_publish",
+            params={"access_token": tok, "creation_id": creation_id},
+            timeout=120,
+        )
+        if r2.ok:
+            mid = r2.json().get("id")
+            log(f"[meta-ig] published: {mid}")
+            return mid
+        log(f"[meta-ig] publish gagal: HTTP {r2.status_code} body={r2.text[:300]}")
+    except Exception as e:
+        log(f"[meta-ig] error: {e}")
+    return None
+
+
+def cross_post_meta(clip_path, title, description):
+    """Orchestrator: upload ke FB Reels dulu, kalau sukses upload ke IG Reels
+    (pakai FB video_id sebagai source untuk IG container)."""
+    fb_vid = upload_to_facebook_reels(clip_path, title, description)
+    if not fb_vid:
+        return None
+    # Set env var sementara biar upload_to_instagram_reels bisa baca
+    os.environ["META_LAST_FB_VIDEO_ID"] = fb_vid
+    ig_vid = upload_to_instagram_reels(clip_path, title, description)
+    return {"fb": fb_vid, "ig": ig_vid}
+
+
 # ---------------------------------------------------------------- POLL (cron fallback)
 def poll_latest():
     """Cek video terbaru di channel via videos.list (butuh YT_READ_TOKEN,
@@ -712,6 +821,12 @@ def main():
                 set_thumbnail(video_id_yt, thumb)
         except Exception as e:
             log(f"[thumb] skip: {e}")
+        # Cross-post ke Meta (Facebook + Instagram Reels). Skip kalau token/env kosong.
+        # Pakai title+desc yang sama dengan YouTube.
+        try:
+            cross_post_meta(clip, title, desc)
+        except Exception as e:
+            log(f"[meta] skip: {e}")
     mark_done(video_id)
     if upload_errors and upload_errors == len(segs[:MAX_CLIPS]):
         log(f"SELESAI (semua upload di-skip, artifact siap di-upload manual)")
