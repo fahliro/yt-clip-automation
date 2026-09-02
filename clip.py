@@ -563,7 +563,9 @@ def _gen_thumbnail_style(seg, transcript, lang, workdir):
 def _extract_frames(clip_path, out_dir, n=3, raw_path=None, start_offset=0.0):
     """Extract n frame dari clip di t=0.3, t=2, t=mid. Return list of paths.
     Kalau raw_path + start_offset dikasih, extract dari raw video
-    (supaya tidak ada subtitle terbakar di frame).
+    (supaya tidak ada subtitle terbakar di frame) DAN resize ke portrait 1080x1920
+    (sama style dengan cut_span: blur bg + foreground center).
+    Kalau tanpa raw_path, extract dari clip_path (sudah 1080x1920 dari cut_span).
     """
     out_dir = pathlib.Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -580,12 +582,27 @@ def _extract_frames(clip_path, out_dir, n=3, raw_path=None, start_offset=0.0):
     # Timestamp absolute di source (raw), bukan relatif clip
     timestamps = [min(0.3, dur*0.05), min(2.0, dur*0.4), dur*0.5]
     timestamps = [t + offset for t in timestamps]
+    # Kalau extract dari raw (landscape source), resize ke portrait 1080x1920
+    # dengan style sama seperti cut_span (blur bg + fg center) — biar
+    # thumbnail_PIL gak kepotong/landscape.
+    if raw_path:
+        fc = ("[0:v]split=2[vbg][vfg];"
+              "[vbg]scale=1080:1920:force_original_aspect_ratio=increase,"
+              "crop=1080:1920,boxblur=20[bg];"
+              "[vfg]scale=1080:-1[fg_scaled];"
+              "[fg_scaled]pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black[fg_padded];"
+              "[bg][fg_padded]overlay=(W-w)/2:(H-h)/2,format=yuv420p[v]")
+    else:
+        fc = None  # clip sudah 1080x1920, gak perlu filter
     frames = []
     for i, t in enumerate(timestamps):
         fp = out_dir / f"frame_{i}.jpg"
-        subprocess.run(["ffmpeg", "-y", "-ss", f"{t:.2f}", "-i", str(source),
-                        "-frames:v", "1", "-q:v", "3", str(fp)],
-                       capture_output=True)
+        cmd = ["ffmpeg", "-y", "-ss", f"{t:.2f}", "-i", str(source)]
+        if fc:
+            cmd += ["-filter_complex", fc, "-map", "[v]", "-frames:v", "1", "-q:v", "3", str(fp)]
+        else:
+            cmd += ["-frames:v", "1", "-q:v", "3", str(fp)]
+        subprocess.run(cmd, capture_output=True)
         if fp.exists() and fp.stat().st_size > 1000:
             frames.append(fp)
     return frames
