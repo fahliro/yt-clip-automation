@@ -446,18 +446,21 @@ def gen_title_desc(seg, transcript, lang):
 #   4. Fallback: pakai frame tengah + hook default
 import base64 as _b64
 def _gen_thumbnail_style(seg, transcript, lang, workdir):
-    """Generate hook text + visual style untuk thumbnail dari konteks video.
-    Context: transcript segment (~500 char), reason, lang.
-    Return dict: {hook_text, font_family, font_size, text_color, emoji_size, vertical_position}
-    Falls back ke default Bebas Neue/kuning kalau LLM error.
-    """
+    """Generate hook text + visual style untuk thumbnail dari konteks video."""
     import requests as _req
-    # Ambil transcript segment untuk konteks naratif
+    
+    # --- PERBAIKAN DI SINI ---
+    # Ambil kata-kata dari transcript berdasarkan start & end segmen
     seg_text = ""
-    if "words" in transcript:
-        s, e = float(seg["start"]), float(seg["end"])
-        ws = [w for w in transcript["words"] if s <= w["start"] < e]
-        seg_text = " ".join(w["word"] for w in ws)[:800]
+    if transcript and "words" in transcript:
+        s, e = float(seg.get("start", 0)), float(seg.get("end", 0))
+        ws = [w["word"] for w in transcript["words"] if s <= w["start"] < e]
+        seg_text = " ".join(ws)[:800]  # Ambil transkrip percakapan utuh
+    
+    # Fallback jika transcript kata kosong
+    if not seg_text.strip():
+        seg_text = seg.get("reason", "TONTON!")
+
     # Default fallback
     default = {
         "hook_text": seg.get("reason", "TONTON!")[:60] or "TONTON!",
