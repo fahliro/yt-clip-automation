@@ -3,3 +3,5 @@ yt-dlp==2026.08.19
 requests>=2.31.0
 # Untuk thumbnail generator (gen_thumbnail -> PIL Image, ImageDraw, ImageFont)
 Pillow>=10.0.0
+# Untuk HTML+CSS thumbnail renderer (Playwright Chromium auto-installs binary)
+playwright>=1.40.0

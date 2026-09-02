@@ -633,10 +633,29 @@ def gen_thumbnail(clip_path, seg, lang, workdir, raw_path=None, start_offset=0.0
                 log(f"[thumb] LLM vision: frame {idx} hook='{hook_text}'")
     except Exception as e:
         log(f"[thumb] LLM vision skip: {e} (fallback ke frame tengah)")
-    # Generate thumbnail
+    # Generate thumbnail. Default: HTML+CSS via Playwright (Twemoji + Google Fonts).
+    # Set THUMBNAIL_HTML=0 untuk fallback ke PIL (gak butuh Chromium).
+    use_html = os.environ.get("THUMBNAIL_HTML", "1") != "0"
     out = workdir / f"thumb_{pathlib.Path(clip_path).stem}.jpg"
-    _add_hook_text(chosen, hook_text, out)
-    log(f"[thumb] saved: {out} ({out.stat().st_size}B)")
+    if use_html:
+        try:
+            import thumbnail as _thumb
+            _thumb.gen_thumbnail_html(
+                str(chosen), hook_text, str(out),
+                font_family="Bebas Neue",
+                font_size=int(1920 * 0.07),  # ~134px (7% of 1920)
+                text_color="#FFE600",
+                vertical_position="center",
+                emoji_size=int(1920 * 0.075),  # ~144px
+            )
+            log(f"[thumb] HTML+CSS saved: {out} ({out.stat().st_size}B)")
+        except Exception as e:
+            log(f"[thumb] HTML+CSS gagal ({e}) -> fallback PIL")
+            _add_hook_text(chosen, hook_text, out)
+            log(f"[thumb] PIL saved: {out} ({out.stat().st_size}B)")
+    else:
+        _add_hook_text(chosen, hook_text, out)
+        log(f"[thumb] PIL saved: {out} ({out.stat().st_size}B)")
     return out if out.exists() else None
 
 

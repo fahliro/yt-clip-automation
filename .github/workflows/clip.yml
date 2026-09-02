@@ -40,6 +40,10 @@ jobs:
             -O /usr/share/fonts/truetype/noto/NotoColorEmoji.ttf || \
             echo "WARN: gagal download Noto Color Emoji, fallback ke monokrom"
           fc-cache -f || true
+          # Install Playwright Chromium untuk HTML+CSS thumbnail renderer.
+          # Tambah ~120MB ke runner, tapi reliable untuk Twemoji SVG + Google Fonts.
+          python -m playwright install chromium 2>&1 | tail -5 || \
+            echo "WARN: gagal install Chromium, thumbnail fallback ke PIL"
 
       - name: Setup ffmpeg
         uses: FedericoCarboni/setup-ffmpeg@v3
