@@ -195,15 +195,15 @@ def pick_segments(transcript):
 def build_ass(words, out_path):
     # Font: pakai DejaVu Sans (built-in di Ubuntu runner GitHub Actions).
     # Arial sering gak ada di Linux -> ffmpeg skip render tanpa error, subtitle kosong.
-    # Position: top-center (Alignment=8 di libass numeric).
-    # Sebelumnya Alignment=2 (bottom-center) -> vision confirm subtitle
-    # nongol di pojok kanan-atas (libass fallback top). Force Alignment=8
-    # eksplisit + MarginV=80 untuk jarak dari atas.
-    # warna: &H00FFFFFF = putih; outline &H00000000 = hitam; Bold=1
+    # Position: bottom-center, font besar (28) untuk Shorts 9:16.
+    # Vision: subtitle terlalu kecil + terlalu atas. MarginV=180 dari
+    # bawah-frame (1920 - 180 = y=1740, area subtitle). Bold=1, Outline=3
+    # untuk kontras di atas background apapun.
+    # warna: &H00FFFFFF = putih; outline &H00000000 = hitam
     # Format fields (22): Name,Font,Size,PCol,SCol,OCol,B,I,U,S,SX,SY,Sp,Ang,
     #   BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
-    style = ("Style: Default,DejaVu Sans,22,&H00FFFFFF,&H000000FF,&H00000000,"
-             "1,0,0,0,100,100,0,0,1,2,0,8,20,20,80,1")
+    style = ("Style: Default,DejaVu Sans,28,&H00FFFFFF,&H000000FF,&H00000000,"
+             "1,0,0,0,100,100,0,0,1,3,0,2,20,20,180,1")
     lines = [
         "[Script Info]", "ScriptType: v4.00+", "PlayResX: 1080", "PlayResY: 1920", "",
         "[V4+ Styles]",
@@ -276,16 +276,27 @@ def cut_span(raw_path, s, e, words, idx, i):
         # colon adalah opsi (mis. original_size=WxH). Solusi: normalkan ke POSIX style.
         # Pakai forward-slash + escape colon di drive letter (C\:/Users/...) + escape backslash.
         ass_path = str(ass).replace("\\", "/").replace(":", "\\:")
-        # complex filtergraph: 2 input ([0:v] dipakai 2x) -> butuh -filter_complex
-        fc = (f"[0:v]scale=1080:-1,boxblur=20[bg];"
-              f"[0:v]scale=1080:-1[fg];"
-              f"[bg][fg]overlay=(W-w)/2:(H-h)/2[ov];"
+        # Portrait 9:16: canvas 1080x1920, blur bg = scale raw ke 1080x1920
+        # (stretch) + boxblur. Foreground = scale raw fit-width (1080 wide)
+        # lalu pad vertikal ke 1080x1920 hitam. Overlay fg center.
+        # PENTING: split input agar dipakai 2x di filter_complex (kalau tdk,
+        # ffmpeg auto-prune dan output landscape).
+        fc = (f"[0:v]split=2[vbg][vfg];"
+              f"[vbg]scale=1080:1920:force_original_aspect_ratio=increase,"
+              f"crop=1080:1920,boxblur=20[bg];"
+              f"[vfg]scale=1080:-1[fg_scaled];"
+              f"[fg_scaled]pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black[fg_padded];"
+              f"[bg][fg_padded]overlay=(W-w)/2:(H-h)/2[ov];"
               f"[ov]subtitles='{ass_path}',format=yuv420p[v]")
     else:
         log(f"[caption] part_{idx:02d}_{i:02d}: kosong (no words in span)")
-        fc = (f"[0:v]scale=1080:-1,boxblur=20[bg];"
-              f"[0:v]scale=1080:-1[fg];"
-              f"[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p[v]")
+        # Portrait 9:16 juga untuk non-subtitle branch
+        fc = (f"[0:v]split=2[vbg][vfg];"
+              f"[vbg]scale=1080:1920:force_original_aspect_ratio=increase,"
+              f"crop=1080:1920,boxblur=20[bg];"
+              f"[vfg]scale=1080:-1[fg_scaled];"
+              f"[fg_scaled]pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black[fg_padded];"
+              f"[bg][fg_padded]overlay=(W-w)/2:(H-h)/2,format=yuv420p[v]")
     run(["ffmpeg", "-y", "-ss", f"{s:.2f}", "-i", str(raw_path), "-t", f"{dur:.2f}",
          "-filter_complex", fc, "-map", "[v]", "-map", "0:a?",
          "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
