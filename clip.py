@@ -798,12 +798,7 @@ def gen_thumbnail(clip_path, seg, lang, workdir, raw_path=None, start_offset=0.0
 
 
 def set_thumbnail(video_id, thumb_path):
-    """Upload custom thumbnail via YouTube Data API thumbnails.set.
-
-    REQUIREMENT: OAuth token MUST include scope youtube.force-ssl.
-    Generate ulang token via get_upload_token.py (sudah include scope ini
-    secara default) kalau dapat 403 "doesn't have permissions".
-    """
+    """Upload custom thumbnail via YouTube Data API thumbnails.set."""
     import requests as _req
     tok = _req.post("https://oauth2.googleapis.com/token", data={
         "client_id": os.environ["YT_UPLOAD_CLIENT"],
@@ -824,12 +819,6 @@ def set_thumbnail(video_id, thumb_path):
     if r.ok:
         log(f"[thumb-set] uploaded for {video_id}")
         return True
-    # Detect 403 "no permission" — kasih hint eksplisit kalau scope kurang.
-    if r.status_code == 403 and ("permission" in r.text.lower() or "thumbnail" in r.text.lower()):
-        log(f"[thumb-set] GAGAL: HTTP 403 (kemungkinan OAuth scope kurang youtube.force-ssl).")
-        log(f"[thumb-set] FIX: jalankan get_upload_token.py untuk regenerate token dengan scope lengkap.")
-        log(f"[thumb-set] Body: {r.text[:300]}")
-        return False
     log(f"[thumb-set] gagal: HTTP {r.status_code} body={r.text[:200]}")
     return False
 
