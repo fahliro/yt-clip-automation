@@ -474,21 +474,48 @@ def _gen_thumbnail_style(seg, transcript, lang, workdir):
         return default  # skip kalau model gak support (heuristic: kilo*)
     lang_name = _LANG_NAME.get(lang, "English")
     prompt = (
-        f"Buat spec thumbnail YouTube Shorts dari konteks video ini.\n"
+        f"Generate thumbnail spec untuk YouTube Shorts.\n"
         f"BAHASA: {lang_name} ({lang}). SEMUA output WAJIB bahasa {lang_name}.\n"
-        f"KONTEKS VIDEO (transcript segment):\n{seg_text}\n\n"
-        f"ALASAN SEGMENT MENARIK: {seg.get('reason', '')}\n\n"
+        f"\n"
+        f"=== KONTEKS SCRIPT (transcript segment) ===\n{seg_text}\n"
+        f"===\n"
+        f"\n"
+        f"TUGAS: Baca script di atas, lalu buat hook text yang:\n"
+        f"  1. Referensi POIN PENTING dari script (plot twist, punchline, info kunci)\n"
+        f"  2. Provokatif/teaser — bikin penasaran klik video\n"
+        f"  3. POV viewer (bukan uploader)\n"
+        f"  4. Max 7 kata, 1-2 emoticon\n"
+        f"  5. JANGAN deskripsi visual/gambar/frame\n"
+        f"  6. JANGAN generic ('Wajib tonton!', 'Video ini...')\n"
+        f"\n"
         f"OUTPUT JSON (no markdown):\n"
         f"{{\n"
-        f'  "hook_text": str (max 7 kata, POV viewer, ada 1-2 emoticon, provokatif/teaser, JANGAN deskripsi),\n'
+        f'  "hook_text": str (WAJIB refer ke konten script),\n'
         f'  "font_family": str (salah satu: "Bebas Neue" | "Anton" | "Inter" | "Roboto" | "Poppins"),\n'
         f'  "font_size": int (90-200, default 134),\n'
         f'  "text_color": hex color string (mis. "#FFE600" kuning, "#FFFFFF" putih, "#FF1744" merah),\n'
         f'  "emoji_size": int (80-200, default 144),\n'
         f'  "vertical_position": salah satu "top" | "center" | "bottom"\n'
         f"}}\n"
-        f"Contoh hook_text bagus: 'Gak bakal nyangka! 😱', 'Plot twist gila! 🤯', 'Wajib tonton! 🔥'\n"
-        f"Contoh hook_text BURUK: 'Video ini membahas tentang X' (jangan deskriptif)"
+        f"\n"
+        f"=== CONTOH (GOOD vs BAD) ===\n"
+        f"\n"
+        f"Script: 'Ternyata suara itu AI, bukan manusia asli!'\n"
+        f"  GOOD hook: 'AI ngaku manusia! 🤯' (refer ke info kunci script)\n"
+        f"  GOOD hook: 'Suara itu AI?! 😱' (provokatif, dari script)\n"
+        f"  BAD hook: 'Muka terkejut' (deskripsi visual, JANGAN)\n"
+        f"  BAD hook: 'Wajib tonton!' (generic, JANGAN)\n"
+        f"\n"
+        f"Script: 'Plot twist: ternyata dia adiknya sendiri!'\n"
+        f"  GOOD hook: 'Plot twist gila! 😱' (refer script)\n"
+        f"  GOOD hook: 'Mereka bersaudara!?' (provokatif)\n"
+        f"  BAD hook: 'Muka sedih' (visual, JANGAN)\n"
+        f"\n"
+        f"Script: '5 tips supaya tidur nyenyak. Tips 3: matikan HP 1 jam sebelum tidur.'\n"
+        f"  GOOD hook: 'Tips 3 paling penting! 💡' (refer script point)\n"
+        f"  BAD hook: 'Orang ngorok' (visual, JANGAN)\n"
+        f"\n"
+        f"=== INGAT: hook_text HARUS tentang SCRIPT, bukan GAMBAR ==="
     )
     try:
         r = _req.post(
