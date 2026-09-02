@@ -30,9 +30,12 @@ TEST_VIDEO_ID = "YVLYNuhKZpc"
 
 def log(m): print(f"[clip] {m}", flush=True)
 
-def run(cmd):
+def run(cmd, log_stderr=False):
     log(" ".join(str(c) for c in cmd[:3]) + " ...")
     r = subprocess.run(cmd, capture_output=True, text=True)
+    if log_stderr or r.returncode != 0:
+        # Selalu log stderr kalau ffmpeg: membantu debug subtitle silent-skip.
+        log(f"stderr_tail: {r.stderr[-500:] if r.stderr else '(empty)'}")
     if r.returncode != 0:
         log(f"ERROR: {r.stderr[-2000:]}")
         raise SystemExit(f"command failed: {cmd[0]}")
@@ -267,7 +270,7 @@ def cut_span(raw_path, s, e, words, idx, i):
     run(["ffmpeg", "-y", "-ss", f"{s:.2f}", "-i", str(raw_path), "-t", f"{dur:.2f}",
          "-filter_complex", fc, "-map", "[v]", "-map", "0:a?",
          "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-         "-c:a", "aac", "-b:a", "128k", str(out)])
+         "-c:a", "aac", "-b:a", "128k", str(out)], log_stderr=True)
     return out
 
 
