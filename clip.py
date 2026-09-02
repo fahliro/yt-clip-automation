@@ -479,31 +479,58 @@ def _extract_frames(clip_path, out_dir, n=3, raw_path=None, start_offset=0.0):
 
 def _add_hook_text(frame_path, hook_text, out_path):
     """Tambah hook text + emoticon ke frame pakai PIL.
-    Hook text: bold, besar, warna mencolok (kuning/merah), outline hitam.
+    Hook text: bold, besar, warna mencolok (kuning), outline hitam.
+    Emoticon: render dengan font emoji berwarna kalau tersedia
+    (Noto Color Emoji di Linux, Segoe UI Emoji di Windows). Kalau tidak ada,
+    fallback ke monokrom (kuning) — tetep terbaca.
     """
+    import re as _re
     from PIL import Image, ImageDraw, ImageFont
     img = Image.open(frame_path).convert("RGB")
     w, h = img.size
     draw = ImageDraw.Draw(img)
-    # Cari font bold yang available
+    # Font text utama (bold sans)
+    font_size = int(h * 0.06)
     font = None
-    font_paths = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",  # Linux CI
+    text_font_paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-        "C:\\Windows\\Fonts\\arialbd.ttf",  # Windows
+        "C:\\Windows\\Fonts\\arialbd.ttf",
         "C:\\Windows\\Fonts\\segoeui.ttf",
     ]
-    for fp in font_paths:
+    for fp in text_font_paths:
         if pathlib.Path(fp).exists():
             try:
-                # Font size ~6% dari tinggi (untuk thumbnail 1920 -> 115)
-                font = ImageFont.truetype(fp, int(h * 0.06))
+                font = ImageFont.truetype(fp, font_size)
                 break
             except Exception:
                 pass
     if font is None:
         font = ImageFont.load_default()
-    # Wrap text max ~20 char per line
+    # Font emoji berwarna (Apple/Google/Microsoft style)
+    emoji_font = None
+    emoji_font_paths = [
+        "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",  # Linux
+        "/usr/share/fonts/truetype/noto-color-emoji/NotoColorEmoji.ttf",  # Linux alt
+        "/usr/share/fonts/NotoColorEmoji.ttf",  # macOS
+        "C:\\Windows\\Fonts\\seguiemj.ttf",  # Windows Segoe UI Emoji
+        "C:\\Windows\\Fonts\\seguisb.ttf",  # Windows Segoe UI Symbol
+    ]
+    for fp in emoji_font_paths:
+        if pathlib.Path(fp).exists():
+            try:
+                # Render size 2x biar emoji lebih besar & jelas di thumbnail
+                emoji_font = ImageFont.truetype(fp, int(font_size * 1.0))
+                break
+            except Exception:
+                pass
+    # Split text jadi: karakter teks + karakter emoji
+    # Range emoji Unicode: 0x1F300-0x1FAFF (majority), 0x2600-0x27BF (symbols)
+    # Plus variation selectors (0xFE0F) dan ZWJ (0x200D)
+    emoji_pattern = _re.compile(
+        r'([\U0001F300-\U0001FAFF\U00002600-\U000027BF\u200D\uFE0F])'
+    )
+    # Wrap per baris (15 char per line max)
     words = hook_text.split()
     lines, cur = [], ""
     for word in words:
@@ -514,20 +541,45 @@ def _add_hook_text(frame_path, hook_text, out_path):
         else:
             cur = test
     if cur: lines.append(cur)
-    # Render text multi-line, center, di y=15% dari atas (safe area)
     line_h = int(h * 0.08)
-    total_h = line_h * len(lines)
     y_start = int(h * 0.15)
+    # Warna hook text — dinamis via env HOOK_TEXT_COLOR (default kuning #FFE600)
+    # Format: 'R,G,B' mis. '255,230,0' atau '255,255,255' (putih) atau '255,0,0' (merah).
+    # Outline selalu hitam (high contrast).
+    hook_color_str = os.environ.get("HOOK_TEXT_COLOR", "255,230,0")
+    try:
+        r, g, b = [int(c.strip()) for c in hook_color_str.split(",")][:3]
+        hook_color = (r, g, b)
+    except Exception:
+        hook_color = (255, 230, 0)
     for i, line in enumerate(lines):
-        bbox = draw.textbbox((0, 0), line, font=font)
-        tw = bbox[2] - bbox[0]; th = bbox[3] - bbox[1]
-        x = (w - tw) // 2
+        # Hitung total width per line (sum of token widths + spacing 4px)
+        tokens = [t for t in emoji_pattern.split(line) if t]
+        token_widths = []
+        for tok in tokens:
+            is_e = bool(emoji_pattern.match(tok))
+            tf = emoji_font if (is_e and emoji_font) else font
+            tb = draw.textbbox((0, 0), tok, font=tf)
+            token_widths.append(tb[2] - tb[0])
+        # Total = sum widths + 4px spacing per gap
+        total_w = sum(token_widths) + max(0, len(tokens) - 1) * 4
+        x = (w - total_w) // 2  # center per line
         y = y_start + i * line_h
-        # Outline hitam (8 arah)
-        for dx, dy in [(-3, -3), (-3, 3), (3, -3), (3, 3), (-3, 0), (3, 0), (0, -3), (0, 3)]:
-            draw.text((x+dx, y+dy), line, font=font, fill=(0, 0, 0))
-        # Teks kuning tebal (warna mencolok)
-        draw.text((x, y), line, font=font, fill=(255, 230, 0))  # kuning
+        # Render per-token
+        cursor_x = x
+        for idx, tok in enumerate(tokens):
+            is_emoji = bool(emoji_pattern.match(tok))
+            tok_font = emoji_font if (is_emoji and emoji_font) else font
+            # Outline hitam 8-arah
+            for dx, dy in [(-3, -3), (-3, 3), (3, -3), (3, 3), (-3, 0), (3, 0), (0, -3), (0, 3)]:
+                draw.text((cursor_x+dx, y+dy), tok, font=tok_font, fill=(0, 0, 0))
+            # Teks dengan warna (kuning default) — JANGAN override kalau emoji font
+            if is_emoji and emoji_font:
+                # font emoji berwarna — biar natural
+                draw.text((cursor_x, y), tok, font=tok_font)
+            else:
+                draw.text((cursor_x, y), tok, font=tok_font, fill=hook_color)
+            cursor_x += token_widths[idx] + 4
     img.save(out_path, "JPEG", quality=92)
     return out_path
 

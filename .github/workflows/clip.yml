@@ -33,6 +33,13 @@ jobs:
           python -m pip install -U pip
           pip install -r requirements.txt
           node --version
+          # Install Noto Color Emoji font (untuk emoticon berwarna di thumbnail).
+          # apt-get butuh sudo di runner Ubuntu — install via fontconfig download.
+          mkdir -p /usr/share/fonts/truetype/noto
+          wget -q "https://github.com/googlefonts/noto-emoji/raw/main/fonts/NotoColorEmoji.ttf" \
+            -O /usr/share/fonts/truetype/noto/NotoColorEmoji.ttf || \
+            echo "WARN: gagal download Noto Color Emoji, fallback ke monokrom"
+          fc-cache -f || true
 
       - name: Setup ffmpeg
         uses: FedericoCarboni/setup-ffmpeg@v3
