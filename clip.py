@@ -337,14 +337,11 @@ _LANG_NAME = {
     "de": "German", "ar": "Arabic", "ru": "Russian", "hi": "Hindi",
     "th": "Thai", "vi": "Vietnamese", "ms": "Malay", "tl": "Filipino",
 }
-def _llm_call_json(prompt, max_retries=1):
-    """Call LLM and return parsed JSON dict (or None on fail).
-    Retry up to max_retries times if JSON parsing fails.
-    Tidak validasi bahasa di sini — itu urusan caller (gen_title_desc).
-    """
+def _llm_call_json(prompt, lang_name="Indonesian", max_retries=1):
     import requests
     base = os.environ.get("LLM_BASE_URL", "").rstrip("/")
-    last_err = None
+    system_msg = f"You are a native {lang_name} content creator. You MUST respond ONLY in valid JSON. All text fields in the JSON MUST be written in 100% fluent {lang_name}."
+    
     for attempt in range(max_retries + 1):
         try:
             r = requests.post(
@@ -352,7 +349,7 @@ def _llm_call_json(prompt, max_retries=1):
                 headers={"Authorization": f"Bearer {os.environ['LLM_API_KEY']}",
                          "Content-Type": "application/json"},
                 json={"model": os.environ["LLM_MODEL"], "messages": [
-                    {"role": "system", "content": "Output HANYA JSON valid, tanpa markdown."},
+                    {"role": "system", "content": system_msg},
                     {"role": "user", "content": prompt}]},
                 timeout=60,
             )
