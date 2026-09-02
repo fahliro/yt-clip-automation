@@ -23,7 +23,8 @@ WORKDIR = pathlib.Path(tempfile.gettempdir()) / "yt_clip"
 WORKDIR.mkdir(parents=True, exist_ok=True)
 
 SILENCE_GAP = 0.4      # detik; gap antar kata > ini = dianggap silence, dibuang
-DEFAULT_FILLERS = ["um", "yah", "gitu", "eh", "ya", "wah", "nih", "kan", "loh"]
+DEFAULT_FILLERS = []   # kosong: kalau LLM gak specify fillers, jangan filter apa-apa
+                       # LLM lebih paham mana filler natural vs substantive per konteks.
 MAX_CLIPS = 100        # cap videos.insert per hari
 # ID test (hardcode buat debug lokal/CI manual). Prod: override via env VIDEO_ID / WebSub / poll.
 TEST_VIDEO_ID = "YVLYNuhKZpc"
@@ -149,11 +150,16 @@ def pick_segments(transcript):
             t, buf = w["end"], []
     transcript_for_llm = (
         "Kamu editor video short. Dari transkrip ber-timestamp berikut, pilih 3-8 segmen "
-        "menarik untuk YouTube Shorts (30-60 detik). Untuk TIAP segmen berikan: "
-        "start (detik), end (detik), score virality (1-10), reason singkat, dan "
-        "fillers = array kata pengisi/pembuka tidak penting dalam segmen itu "
-        "(mis: 'yah','gitu','eh','ya'). Jawab HANYA JSON array: "
-        "[{\"start\":float,\"end\":float,\"score\":int,\"reason\":str,\"fillers\":[str]}].\n"
+        "menarik untuk YouTube Shorts.\n"
+        "DURASI: setiap segmen HARUS 25-45 detik. Kalau momen lucu <25 detik, gabungkan "
+        "dengan konteks sebelum/sesudahnya sampai 25-45 detik. Kalau >45 detik, pilih 25-45 "
+        "detik PALING menarik (skip intro/outro, mulai dari hook).\n"
+        "FILTERS: untuk TIAP segmen WAJIB sertakan 'fillers' = array kata yang bisa "
+        "dibuang (pengisi/filler murni: 'um', 'eh', 'anu', 'apa tuh', dll). JANGAN masukkan "
+        "kata substantif/konten ke fillers. Kosongkan [] kalau tidak ada filler.\n"
+        "FORMAT: JSON array [{start,end,score,reason,fillers}]. start/end = detik absolut "
+        "dari raw video. score virality 1-10. reason singkat (1 kalimat). "
+        "Jawab HANYA JSON (no markdown).\n"
         + "\n".join(chunks)[:14000]
     )
 
