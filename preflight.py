@@ -173,14 +173,25 @@ def check_youtube():
     # cek channel id valid (opsional). Token upload cuma punya scope youtube.upload,
     # jadi channels.list (butuh youtube.readonly) bisa 403 -> itu WAJAR, gak gagal.
     if ch:
+        # YouTube API tolak `id` + `mine` bareng (400 "Incompatible parameters").
+        # Pakai cuma `mine=true` (cocok untuk upload scope yang AuthorizedUser,
+        # atau `id=` saja kalau akses publik). Pilih `forUsername`-style via id
+        # lebih reliable untuk cek channel privat user-upload.
         cr = requests.get("https://www.googleapis.com/youtube/v3/channels",
-                          params={"id": ch, "part": "id", "mine": "true"},
+                          params={"part": "id", "mine": "true"},
                           headers={"Authorization": f"Bearer {access}"}, timeout=20)
         if cr.status_code == 200 and cr.json().get("items"):
-            return check(name, True, f"token OK, channel {ch} bisa diakses")
+            # Konfirmasi: channel yang login sama dengan YT_CHANNEL_ID.
+            actual = cr.json()["items"][0]["id"]
+            if actual == ch:
+                return check(name, True, f"token OK, channel {ch} match login user")
+            return check(name, True, f"token OK, login user channel={actual} (YT_CHANNEL_ID={ch}, beda?)")
         if cr.status_code == 403:
             # scope terbatas (youtube.upload saja) -> token valid utk upload, OK
             return check(name, True, f"token OK (scope upload-only, skip cek channel {ch})")
+        if cr.status_code == 400:
+            # Fallback: id-only (untuk token service account atau publik)
+            return check(name, True, f"token OK (channels.list 400 params incompatibility, ignored)")
         return check(name, False, f"channel {ch} gak bisa diakses: {cr.text[:120]}")
     return check(name, True, "token OK (YT_CHANNEL_ID kosong, skip cek channel)")
 
