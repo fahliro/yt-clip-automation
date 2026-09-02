@@ -243,7 +243,13 @@ def clip_segment(raw_path, seg, all_words, idx):
     parts = []
     for i, (s, e) in enumerate(spans):
         span_words = [w for w in seg_words if s <= w["start"] < e]
-        parts.append(cut_span(raw_path, s, e, span_words, idx, i))
+        # Offset ASS timestamps ke 0 (relative ke clip).
+        # Whisper kasih absolute timestamp dari raw video; setelah ffmpeg -ss
+        # seek + -t, output video mulai 0 tapi ASS masih pakai timestamp
+        # absolut -> subtitle di luar range, gak ke-render. Offset di sini.
+        clip_words = [{"word": w["word"], "start": w["start"] - s, "end": w["end"] - s}
+                      for w in span_words]
+        parts.append(cut_span(raw_path, s, e, clip_words, idx, i))
     final = concat_parts(parts, idx)
     return final
 
