@@ -802,12 +802,27 @@ def main():
             "start": float(seg["start"]), "end": float(seg["end"]),
             "fillers": seg.get("fillers", []),
         }, indent=2, ensure_ascii=False), encoding="utf-8")
+        # Generate thumbnail DULU (sebelum upload) — agar masuk artifact
+        # meskipun upload ke YouTube kena quota limit.
+        thumb = None
+        try:
+            thumb = gen_thumbnail(clip, seg, lang, WORKDIR)
+        except Exception as e:
+            log(f"[thumb] skip: {e}")
+        # Update meta JSON dengan path thumbnail (kalau ada)
+        if thumb:
+            try:
+                meta_data = json.loads(meta_file.read_text(encoding="utf-8"))
+                meta_data["thumb"] = str(thumb)
+                meta_file.write_text(json.dumps(meta_data, indent=2, ensure_ascii=False), encoding="utf-8")
+            except Exception:
+                pass
         # Upload ke YouTube. Kalau limit/gagal, skip tapi jangan stop pipeline
         # (artifact clip + thumbnail sudah ke-render, bisa di-upload manual nanti).
         video_id_yt = None
         try:
             video_id_yt = upload_video(clip, title, desc)
-            save_uploaded(video_id_yt, video_id, title, None)
+            save_uploaded(video_id_yt, video_id, title, str(thumb) if thumb else None)
         except requests.HTTPError as e:
             code = e.response.status_code if e.response else 0
             body = ""
@@ -822,13 +837,12 @@ def main():
         except Exception as e:
             log(f"[upload] error: {e} — artifact clip tetap di WORKDIR")
             upload_errors += 1
-        # Generate thumbnail dari clip + set di YouTube
-        try:
-            thumb = gen_thumbnail(clip, seg, lang, WORKDIR)
-            if thumb and video_id_yt:
+        # Set thumbnail di YouTube (kalau upload sukses)
+        if thumb and video_id_yt:
+            try:
                 set_thumbnail(video_id_yt, thumb)
-        except Exception as e:
-            log(f"[thumb] skip: {e}")
+            except Exception as e:
+                log(f"[thumb-set] skip: {e}")
         # Cross-post ke Meta (Facebook + Instagram Reels). Skip kalau token/env kosong.
         # Pakai title+desc yang sama dengan YouTube.
         try:
