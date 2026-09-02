@@ -376,10 +376,7 @@ def gen_title_desc(seg, transcript, lang):
     """Generate engaging title + description via LLM.
     - title: catchy, max 100 char, pake 1-2 emoticon, bahasa = lang
     - desc: 2-4 kalimat POV viewers, pake emoticon, bahasa = lang
-    Approach: prompt tegas (100% bahasa target, contoh GOOD/BAD) +
-              retry 1x kalau LLM tetap ngeluarin bahasa yang salah.
-              Tidak ada heuristic post-hoc — trust the prompt.
-    Falls back ke template kalau LLM gagal.
+    Simple approach: prompt tegas (100% bahasa target) + fallback kalau LLM gagal.
     """
     lang_name = _LANG_NAME.get(lang, "English")
     seg_text = seg.get("text") or seg.get("reason", "")
@@ -394,28 +391,20 @@ def gen_title_desc(seg, transcript, lang):
         lang = lang_override
         lang_name = _LANG_NAME[lang]
 
-    base_prompt = (
+    prompt = (
         f"Buat title + description untuk YouTube Shorts (max 60 detik).\n"
         f"\n"
         f"=== ATURAN BAHASA (WAJIB, tanpa exception) ===\n"
         f"Bahasa target = {lang_name} ({lang}).\n"
         f"SELURUH title dan description HARUS 100% {lang_name} dari awal sampai akhir.\n"
-        f"JANGAN pakai kata dari bahasa lain, termasuk 'you', 'your', 'this', 'that', 'the', "
-        f"'apps', 'real-time', 'fire', 'phone', 'mix up', 'never', 'always', 'drop a', dll.\n"
-        f"Kalau konteks mengandung istilah Inggris/asing, TRANSLATE atau PARAPHRASE ke {lang_name}.\n"
+        f"JANGAN pakai kata dari bahasa lain.\n"
+        f"Kalau konteks mengandung istilah asing, TRANSLATE atau PARAPHRASE ke {lang_name}.\n"
         f"\n"
         f"=== FORMAT ===\n"
         f"- title: 1 kalimat catchy, max 100 char, 1-2 emoticon\n"
         f"- desc: 2-4 kalimat engaging + 1-2 hashtag relevan + CTA (like/comment/share)\n"
         f"- POV: sudut pandang VIEWER (yang nonton & react), bukan uploader.\n"
-        f"  Mis. bukan 'Saya cerita tentang X' tapi 'Kamu gak bakal percaya X! 😱'\n"
-        f"  Hindari 'video ini', 'clip ini', 'konten ini'.\n"
         f"- Output JSON valid: {{\"title\": str, \"desc\": str}}\n"
-        f"\n"
-        f"=== CONTOH (GOOD vs BAD, asumsi bahasa target = Indonesian) ===\n"
-        f"  GOOD title: 'Kamu gak bakal nyangka api vs HP ini! 🔥📱'\n"
-        f"  BAD  title: 'You'll never mix up real-time apps after this...' ← DITOLAK\n"
-        f"  BAD  title: 'Ditch confusing jargon for good' ← DITOLAK\n"
         f"\n"
         f"=== KONTEKS SCRIPT ===\n"
         f"{seg_text}\n"
@@ -423,67 +412,17 @@ def gen_title_desc(seg, transcript, lang):
         f"=== ALASAN SEGMENT INI MENARIK ===\n"
         f"{seg.get('reason', '')}\n"
     )
-    # Sistem message pendek, dorong patuh bahasa
-    system = (
-        f"Anda menulis untuk YouTube Shorts. "
-        f"Bahasa output: {lang_name} ({lang}). "
-        f"Dilarang mencampur bahasa lain. Output HANYA JSON tanpa markdown."
-    )
 
-    last_data = _llm_call_json(base_prompt)
-    # Retry 1x kalau attempt pertama menghasilkan title/desc yang
-    # tampak ngambang / terlalu pendek / JSON shape rusak.
-    # (Tidak cek bahasa di sini — trust the prompt.)
-    # English stopword umum yang sering muncul di output LLM bandel.
-    # Bukan validator sempurna — cuma tripwire supaya LLM dikasih
-    # kesempatan 1x retry kalau attempt pertama jelas English.
-    _EN_TRIPWIRE = (" the ", " you ", " your ", " this ", " that ", " will ",
-                    " never ", " always ", " believe ", " really ", " watch ",
-                    " you'll ", " won't ", " can't ", " don't ", " amazing ")
-    def _looks_english(text):
-        text_lower = " " + (text or "").lower() + " "
-        return sum(1 for w in _EN_TRIPWIRE if w in text_lower) >= 3
-
-    needs_retry = False
-    if last_data is None:
-        needs_retry = True
-    else:
-        t_text = (last_data.get("title") or "").strip()
-        d_text = (last_data.get("desc") or last_data.get("description") or "").strip()
-        if not t_text or not d_text or len(t_text) < 10 or len(d_text) < 20:
-            needs_retry = True
-        elif _looks_english(t_text + " " + d_text):
-            log(f"[title-desc] output English detected -> retry")
-            needs_retry = True
-
-    if needs_retry:
-        retry_msg = (
-            f"{base_prompt}"
-                f"\n=== PESAN UNTUK RETRY ===\n"
-                f"Attempt sebelumnya gagal/result tidak lengkap. "
-                f"Tolong tulis ulang dengan patuh 100% bahasa {lang_name}. "
-                f"Pastikan JSON valid {{\"title\": str, \"desc\": str}}. "
-                f"Jangan kasih penjelasan di luar JSON."
-        )
-        retry_data = _llm_call_json(retry_msg)
-        if retry_data is not None:
-            last_data = retry_data
-            log("[title-desc] retry used")
-
-    if last_data is not None:
-        title = (last_data.get("title") or "").strip()[:100]
-        desc = (last_data.get("desc") or last_data.get("description") or "").strip()[:4900]
+    data = _llm_call_json(prompt)
+    if data is not None:
+        title = (data.get("title") or "").strip()[:100]
+        desc = (data.get("desc") or data.get("description") or "").strip()[:4900]
         if title and desc:
-            # Final tripwire: kalau setelah retry output masih English,
-            # reject dan fallback ke template (gak ambil risiko upload English).
-            if _looks_english(title + " " + desc):
-                log(f"[title-desc] FINAL output still English after retry -> fallback")
-            else:
-                log(f"[title-desc] {lang} -> '{title[:60]}'")
-                return title, desc
+            log(f"[title-desc] {lang} -> '{title[:60]}'")
+            return title, desc
 
-    # Fallback template kalau LLM gagal / retry masih gagal
-    log(f"[title-desc] LLM gagal total -> fallback template ({lang})")
+    # Fallback template kalau LLM gagal
+    log(f"[title-desc] LLM gagal -> fallback template ({lang})")
     score = seg.get("score", "?")
     if lang == "id":
         title = f"Kamu gak bakal nyangka! 😱 Skor {score} 🔥"
@@ -492,7 +431,6 @@ def gen_title_desc(seg, transcript, lang):
         title = f"You won't believe this! 😱 Score {score} 🔥"
         desc = (seg.get("reason") or "Must watch!") + "\n\nLike & share! 💯 #shorts"
     else:
-        # Bahasa lain (ja, ko, zh, dll): generic tapi pake nama bahasa
         title = f"{lang_name} highlight! 😱 Skor {score} 🔥"
         desc = (seg.get("reason") or f"Watch this {lang_name} clip!") + f"\n\nLike ya! 💯 #shorts"
     return title[:100], desc[:4900]
