@@ -85,7 +85,7 @@ jobs:
           git commit -m "update state" || true
           git push || true
 
-      - name: Upload clip artifacts (debug subtitle/visual)
+      - name: Upload clip artifacts (debug subtitle/visual/thumbnail)
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -94,5 +94,7 @@ jobs:
             /tmp/yt_clip/part_*.mp4
             /tmp/yt_clip/clip_*.mp4
             /tmp/yt_clip/cap_*.ass
+            /tmp/yt_clip/thumb_*.jpg
+            /tmp/yt_clip/frames/*.jpg
           if-no-files-found: warn
           retention-days: 7

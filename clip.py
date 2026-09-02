@@ -17,7 +17,8 @@ ENV wajib (GitHub Secrets / Actions variables):
   VIDEO_ID, YT_CHANNEL_ID, YT_DL_OAUTH_JSON, YT_UPLOAD_CLIENT, YT_UPLOAD_SECRET,
   YT_UPLOAD_TOKEN, GROQ_API_KEY, LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, STATE_FILE
 """
-import os, json, subprocess, sys, tempfile, re, pathlib
+import os, json, subprocess, sys, tempfile, re, pathlib, datetime
+import requests
 
 WORKDIR = pathlib.Path(tempfile.gettempdir()) / "yt_clip"
 WORKDIR.mkdir(parents=True, exist_ok=True)
@@ -394,6 +395,173 @@ def gen_title_desc(seg, transcript, lang):
     return title[:100], desc[:4900]
 
 
+# ---------------------------------------------------------------- 4d. THUMBNAIL
+# Extract frame terbaik dari clip + tambah hook text + emoticon.
+# Returns: path ke thumbnail JPG (1080x1920 portrait), atau None kalau gagal.
+# Vision flow:
+#   1. Extract 3 frame candidate (t=0.3s, t=2s, t=tengah)
+#   2. Encode base64 + kirim ke LLM vision (kalau support)
+#   3. LLM pilih frame terbaik + kasih hook text
+#   4. Fallback: pakai frame tengah + hook default
+import base64 as _b64
+def _extract_frames(clip_path, out_dir, n=3):
+    """Extract n frame dari clip di t=0.3, t=2, t=mid. Return list of paths."""
+    out_dir = pathlib.Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    # Probe durasi
+    r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                        "-of", "default=noprint_wrappers=1:nokey=1", str(clip_path)],
+                       capture_output=True, text=True)
+    try:
+        dur = float(r.stdout.strip())
+    except Exception:
+        dur = 5.0
+    timestamps = [min(0.3, dur*0.05), min(2.0, dur*0.4), dur*0.5]
+    frames = []
+    for i, t in enumerate(timestamps):
+        fp = out_dir / f"frame_{i}.jpg"
+        subprocess.run(["ffmpeg", "-y", "-ss", f"{t:.2f}", "-i", str(clip_path),
+                        "-frames:v", "1", "-q:v", "3", str(fp)],
+                       capture_output=True)
+        if fp.exists() and fp.stat().st_size > 1000:
+            frames.append(fp)
+    return frames
+
+def _add_hook_text(frame_path, hook_text, out_path):
+    """Tambah hook text + emoticon ke frame pakai PIL.
+    Hook text: bold, besar, warna mencolok (kuning/merah), outline hitam.
+    """
+    from PIL import Image, ImageDraw, ImageFont
+    img = Image.open(frame_path).convert("RGB")
+    w, h = img.size
+    draw = ImageDraw.Draw(img)
+    # Cari font bold yang available
+    font = None
+    font_paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",  # Linux CI
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "C:\\Windows\\Fonts\\arialbd.ttf",  # Windows
+        "C:\\Windows\\Fonts\\segoeui.ttf",
+    ]
+    for fp in font_paths:
+        if pathlib.Path(fp).exists():
+            try:
+                # Font size ~6% dari tinggi (untuk thumbnail 1920 -> 115)
+                font = ImageFont.truetype(fp, int(h * 0.06))
+                break
+            except Exception:
+                pass
+    if font is None:
+        font = ImageFont.load_default()
+    # Wrap text max ~20 char per line
+    words = hook_text.split()
+    lines, cur = [], ""
+    for word in words:
+        test = (cur + " " + word).strip()
+        bbox = draw.textbbox((0, 0), test, font=font)
+        if bbox[2] - bbox[0] > w * 0.85 and cur:
+            lines.append(cur); cur = word
+        else:
+            cur = test
+    if cur: lines.append(cur)
+    # Render text multi-line, center, di y=15% dari atas (safe area)
+    line_h = int(h * 0.08)
+    total_h = line_h * len(lines)
+    y_start = int(h * 0.15)
+    for i, line in enumerate(lines):
+        bbox = draw.textbbox((0, 0), line, font=font)
+        tw = bbox[2] - bbox[0]; th = bbox[3] - bbox[1]
+        x = (w - tw) // 2
+        y = y_start + i * line_h
+        # Outline hitam (8 arah)
+        for dx, dy in [(-3, -3), (-3, 3), (3, -3), (3, 3), (-3, 0), (3, 0), (0, -3), (0, 3)]:
+            draw.text((x+dx, y+dy), line, font=font, fill=(0, 0, 0))
+        # Teks kuning tebal (warna mencolok)
+        draw.text((x, y), line, font=font, fill=(255, 230, 0))  # kuning
+    img.save(out_path, "JPEG", quality=92)
+    return out_path
+
+def gen_thumbnail(clip_path, seg, lang, workdir):
+    """Generate thumbnail untuk clip. Returns path to JPG or None.
+    1. Extract 3 frame
+    2. Try LLM vision (kalau model support image input)
+    3. Fallback: pakai frame tengah + hook default dari seg.reason
+    """
+    workdir = pathlib.Path(workdir)
+    frames = _extract_frames(clip_path, workdir / "frames")
+    if not frames:
+        log("[thumb] gagal extract frame"); return None
+    chosen = frames[len(frames) // 2]  # default: frame tengah
+    hook_text = seg.get("reason", "TONTON!")[:60] or "TONTON!"
+    # Try LLM vision (best-effort, kalau model gak support -> fallback)
+    try:
+        import requests as _req
+        base = os.environ.get("LLM_BASE_URL", "").rstrip("/")
+        model = os.environ.get("LLM_MODEL", "")
+        # Encode frames as data URL
+        content_parts = [{
+            "type": "text",
+            "text": (f"Pilih 1 frame PALING menarik untuk thumbnail YouTube Shorts. "
+                    f"Jawab HANYA JSON: {{\"frame_index\": 0|1|2, \"hook_text\": str (max 5 kata, "
+                    f"POV viewer, ada 1 emoticon, bahasa {lang})}}")
+        }]
+        for fp in frames:
+            data = _b64.b64encode(fp.read_bytes()).decode()
+            content_parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{data}"}})
+        r = _req.post(
+            f"{base}/chat/completions",
+            headers={"Authorization": f"Bearer {os.environ.get('LLM_API_KEY', '')}",
+                     "Content-Type": "application/json"},
+            json={"model": model, "messages": [
+                {"role": "system", "content": "Output JSON saja tanpa markdown."},
+                {"role": "user", "content": content_parts}]},
+            timeout=60,
+        )
+        if r.ok:
+            content = _re.sub(r"```(?:json)?", "", r.json()["choices"][0]["message"]["content"]).strip().strip("`")
+            data = json.loads(content)
+            idx = int(data.get("frame_index", 1))
+            if 0 <= idx < len(frames):
+                chosen = frames[idx]
+            hook = (data.get("hook_text") or hook_text).strip()[:60]
+            if hook:
+                hook_text = hook
+                log(f"[thumb] LLM vision: frame {idx} hook='{hook_text}'")
+    except Exception as e:
+        log(f"[thumb] LLM vision skip: {e} (fallback ke frame tengah)")
+    # Generate thumbnail
+    out = workdir / f"thumb_{pathlib.Path(clip_path).stem}.jpg"
+    _add_hook_text(chosen, hook_text, out)
+    log(f"[thumb] saved: {out} ({out.stat().st_size}B)")
+    return out if out.exists() else None
+
+
+def set_thumbnail(video_id, thumb_path):
+    """Upload custom thumbnail via YouTube Data API thumbnails.set."""
+    import requests as _req
+    tok = _req.post("https://oauth2.googleapis.com/token", data={
+        "client_id": os.environ["YT_UPLOAD_CLIENT"],
+        "client_secret": os.environ["YT_UPLOAD_SECRET"],
+        "refresh_token": os.environ["YT_UPLOAD_TOKEN"],
+        "grant_type": "refresh_token",
+    }).json()
+    access = tok.get("access_token")
+    if not access:
+        log("[thumb-set] gagal dapat access token"); return False
+    with open(thumb_path, "rb") as f:
+        r = _req.post(
+            f"https://www.googleapis.com/youtube/v3/thumbnails/set?videoId={video_id}",
+            headers={"Authorization": f"Bearer {access}"},
+            files={"media": (pathlib.Path(thumb_path).name, f, "image/jpeg")},
+            timeout=60,
+        )
+    if r.ok:
+        log(f"[thumb-set] uploaded for {video_id}")
+        return True
+    log(f"[thumb-set] gagal: HTTP {r.status_code} body={r.text[:200]}")
+    return False
+
+
 # ---------------------------------------------------------------- 5. UPLOAD
 def upload_video(path, title, description):
     import requests, time
@@ -447,9 +615,20 @@ def already_done(video_id):
 
 def mark_done(video_id):
     sf = pathlib.Path(os.environ.get("STATE_FILE", "state.json"))
-    data = json.loads(sf.read_text()) if sf.exists() else {"done": []}
-    data["done"].append(video_id)
-    sf.write_text(json.dumps(data))
+    data = json.loads(sf.read_text()) if sf.exists() else {"done": [], "uploaded": {}}
+    if video_id not in data["done"]:
+        data["done"].append(video_id)
+    sf.write_text(json.dumps(data, indent=2))
+
+
+def save_uploaded(youtube_id, raw_video_id, title, thumb_path):
+    """Track uploaded Shorts di state.json biar bisa di-retry kalau ada error."""
+    sf = pathlib.Path(os.environ.get("STATE_FILE", "state.json"))
+    data = json.loads(sf.read_text()) if sf.exists() else {"done": [], "uploaded": {}}
+    data.setdefault("uploaded", {})[youtube_id] = {
+        "raw": raw_video_id, "title": title, "thumb": str(thumb_path) if thumb_path else None,
+        "ts": datetime.datetime.now().isoformat()}
+    sf.write_text(json.dumps(data, indent=2))
 
 
 # ---------------------------------------------------------------- POLL (cron fallback)
@@ -499,15 +678,45 @@ def main():
     tr = transcribe(raw)
     words = tr.get("words", [])
     segs = pick_segments(tr)
+    upload_errors = 0
     for i, seg in enumerate(segs[:MAX_CLIPS]):
         clip = clip_segment(raw, seg, words, i)
         # Detect bahasa: pakai 'language' dari Whisper response, fallback 'en'
         lang = tr.get("language", "en")
         # Generate title/desc engaging via LLM (bhs sesuai video + emoticon)
         title, desc = gen_title_desc(seg, tr, lang)
-        upload_video(clip, title, desc)
+        # Upload ke YouTube. Kalau limit/gagal, skip tapi jangan stop pipeline
+        # (artifact clip + thumbnail sudah ke-render, bisa di-upload manual nanti).
+        video_id_yt = None
+        try:
+            video_id_yt = upload_video(clip, title, desc)
+            save_uploaded(video_id_yt, video_id, title, None)
+        except requests.HTTPError as e:
+            code = e.response.status_code if e.response else 0
+            body = ""
+            try: body = e.response.text[:200] if e.response else ""
+            except Exception: pass
+            if "uploadLimitExceeded" in body or code in (400, 429):
+                log(f"[upload] SKIP (limit/quota) — artifact clip tetap di WORKDIR, "
+                    f"bisa di-upload manual. raw={video_id} seg={i}")
+                upload_errors += 1
+            else:
+                raise  # error lain -> stop pipeline
+        except Exception as e:
+            log(f"[upload] error: {e} — artifact clip tetap di WORKDIR")
+            upload_errors += 1
+        # Generate thumbnail dari clip + set di YouTube
+        try:
+            thumb = gen_thumbnail(clip, seg, lang, WORKDIR)
+            if thumb and video_id_yt:
+                set_thumbnail(video_id_yt, thumb)
+        except Exception as e:
+            log(f"[thumb] skip: {e}")
     mark_done(video_id)
-    log("SELESAI")
+    if upload_errors and upload_errors == len(segs[:MAX_CLIPS]):
+        log(f"SELESAI (semua upload di-skip, artifact siap di-upload manual)")
+    else:
+        log("SELESAI")
 
 
 if __name__ == "__main__":
