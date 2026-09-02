@@ -447,6 +447,85 @@ def _lang_matches(text, lang):
 #   3. LLM pilih frame terbaik + kasih hook text
 #   4. Fallback: pakai frame tengah + hook default
 import base64 as _b64
+def _gen_thumbnail_style(seg, transcript, lang, workdir):
+    """Generate hook text + visual style untuk thumbnail dari konteks video.
+    Context: transcript segment (~500 char), reason, lang.
+    Return dict: {hook_text, font_family, font_size, text_color, emoji_size, vertical_position}
+    Falls back ke default Bebas Neue/kuning kalau LLM error.
+    """
+    import requests as _req
+    # Ambil transcript segment untuk konteks naratif
+    seg_text = ""
+    if "words" in transcript:
+        s, e = float(seg["start"]), float(seg["end"])
+        ws = [w for w in transcript["words"] if s <= w["start"] < e]
+        seg_text = " ".join(w["word"] for w in ws)[:800]
+    # Default fallback
+    default = {
+        "hook_text": seg.get("reason", "TONTON!")[:60] or "TONTON!",
+        "font_family": "Bebas Neue",
+        "font_size": 134,
+        "text_color": "#FFE600",
+        "emoji_size": 144,
+        "vertical_position": "center",
+    }
+    base = os.environ.get("LLM_BASE_URL", "").rstrip("/")
+    if not base or "kilo" in (os.environ.get("LLM_MODEL", "").lower()):
+        return default  # skip kalau model gak support (heuristic: kilo*)
+    lang_name = _LANG_NAME.get(lang, "English")
+    prompt = (
+        f"Buat spec thumbnail YouTube Shorts dari konteks video ini.\n"
+        f"BAHASA: {lang_name} ({lang}). SEMUA output WAJIB bahasa {lang_name}.\n"
+        f"KONTEKS VIDEO (transcript segment):\n{seg_text}\n\n"
+        f"ALASAN SEGMENT MENARIK: {seg.get('reason', '')}\n\n"
+        f"OUTPUT JSON (no markdown):\n"
+        f"{{\n"
+        f'  "hook_text": str (max 7 kata, POV viewer, ada 1-2 emoticon, provokatif/teaser, JANGAN deskripsi),\n'
+        f'  "font_family": str (salah satu: "Bebas Neue" | "Anton" | "Inter" | "Roboto" | "Poppins"),\n'
+        f'  "font_size": int (90-200, default 134),\n'
+        f'  "text_color": hex color string (mis. "#FFE600" kuning, "#FFFFFF" putih, "#FF1744" merah),\n'
+        f'  "emoji_size": int (80-200, default 144),\n'
+        f'  "vertical_position": salah satu "top" | "center" | "bottom"\n'
+        f"}}\n"
+        f"Contoh hook_text bagus: 'Gak bakal nyangka! 😱', 'Plot twist gila! 🤯', 'Wajib tonton! 🔥'\n"
+        f"Contoh hook_text BURUK: 'Video ini membahas tentang X' (jangan deskriptif)"
+    )
+    try:
+        r = _req.post(
+            f"{base}/chat/completions",
+            headers={"Authorization": f"Bearer {os.environ['LLM_API_KEY']}",
+                     "Content-Type": "application/json"},
+            json={"model": os.environ["LLM_MODEL"], "messages": [
+                {"role": "system", "content": "Output JSON saja tanpa markdown."},
+                {"role": "user", "content": prompt}]},
+            timeout=60,
+        )
+        if r.ok:
+            content = _re.sub(r"```(?:json)?", "", r.json()["choices"][0]["message"]["content"]).strip().strip("`")
+            data = json.loads(content)
+            # Validate language match
+            full_text = data.get("hook_text", "")
+            if _lang_matches(full_text, lang):
+                default["hook_text"] = full_text[:60]
+                default["font_family"] = data.get("font_family", default["font_family"])
+                try: default["font_size"] = int(data.get("font_size", 134))
+                except Exception: pass
+                if re.match(r"^#[0-9A-Fa-f]{6}$", str(data.get("text_color", ""))):
+                    default["text_color"] = data["text_color"]
+                try: default["emoji_size"] = int(data.get("emoji_size", 144))
+                except Exception: pass
+                if data.get("vertical_position") in ("top", "center", "bottom"):
+                    default["vertical_position"] = data["vertical_position"]
+                log(f"[thumb-style] {lang} font={default['font_family']} "
+                    f"color={default['text_color']} hook='{default['hook_text'][:50]}'")
+                return default
+            else:
+                log(f"[thumb-style] LLM output gak match lang={lang} -> default")
+    except Exception as e:
+        log(f"[thumb-style] LLM error: {e} -> default")
+    return default
+
+
 def _extract_frames(clip_path, out_dir, n=3, raw_path=None, start_offset=0.0):
     """Extract n frame dari clip di t=0.3, t=2, t=mid. Return list of paths.
     Kalau raw_path + start_offset dikasih, extract dari raw video
@@ -583,12 +662,16 @@ def _add_hook_text(frame_path, hook_text, out_path):
     img.save(out_path, "JPEG", quality=92)
     return out_path
 
-def gen_thumbnail(clip_path, seg, lang, workdir, raw_path=None, start_offset=0.0):
+def gen_thumbnail(clip_path, seg, lang, workdir, raw_path=None, start_offset=0.0, transcript=None):
     """Generate thumbnail untuk clip. Returns path to JPG or None.
-    1. Extract 3 frame dari raw_path (kalau ada) supaya tidak ada subtitle terbakar,
+    1. Pre-step: LLM generate hook text + style (font, color, size, position)
+       dari transcript segment. Pisah dari vision step karena text-style butuh
+       konteks NARASI, vision butuh konteks VISUAL.
+    2. Extract 3 frame dari raw_path (kalau ada) supaya tidak ada subtitle terbakar,
        fallback ke clip_path kalau raw_path tidak dikasih
-    2. Try LLM vision (kalau model support image input)
-    3. Fallback: pakai frame tengah + hook default dari seg.reason
+    3. Try LLM vision (kalau model support image input) -> pilih frame terbaik
+    4. Render HTML+CSS via Playwright + Twemoji inline + Google Fonts (default)
+       Fallback ke PIL kalau Playwright error / THUMBNAIL_HTML=0
     """
     workdir = pathlib.Path(workdir)
     frames = _extract_frames(clip_path, workdir / "frames",
@@ -596,8 +679,11 @@ def gen_thumbnail(clip_path, seg, lang, workdir, raw_path=None, start_offset=0.0
     if not frames:
         log("[thumb] gagal extract frame"); return None
     chosen = frames[len(frames) // 2]  # default: frame tengah
-    hook_text = seg.get("reason", "TONTON!")[:60] or "TONTON!"
-    # Try LLM vision (best-effort, kalau model gak support -> fallback)
+    # Step 1: Generate hook text + style dari LLM dengan konteks video (transcript)
+    # Pisah dari vision: text-style butuh konteks NARASI, vision butuh konteks VISUAL
+    style = _gen_thumbnail_style(seg, transcript, lang, workdir)
+    hook_text = style["hook_text"]
+    # Step 2: Try LLM vision (best-effort, kalau model support -> pilih frame terbaik)
     try:
         import requests as _req
         base = os.environ.get("LLM_BASE_URL", "").rstrip("/")
@@ -642,13 +728,14 @@ def gen_thumbnail(clip_path, seg, lang, workdir, raw_path=None, start_offset=0.0
             import thumbnail as _thumb
             _thumb.gen_thumbnail_html(
                 str(chosen), hook_text, str(out),
-                font_family="Bebas Neue",
-                font_size=int(1920 * 0.07),  # ~134px (7% of 1920)
-                text_color="#FFE600",
-                vertical_position="center",
-                emoji_size=int(1920 * 0.075),  # ~144px
+                font_family=style["font_family"],
+                font_size=style["font_size"],
+                text_color=style["text_color"],
+                emoji_size=style["emoji_size"],
+                vertical_position=style["vertical_position"],
             )
-            log(f"[thumb] HTML+CSS saved: {out} ({out.stat().st_size}B)")
+            log(f"[thumb] HTML+CSS saved: {out} ({out.stat().st_size}B) "
+                f"font={style['font_family']} color={style['text_color']}")
         except Exception as e:
             log(f"[thumb] HTML+CSS gagal ({e}) -> fallback PIL")
             _add_hook_text(chosen, hook_text, out)
@@ -930,7 +1017,8 @@ def main():
         thumb = None
         try:
             thumb = gen_thumbnail(clip, seg, lang, WORKDIR,
-                                  raw_path=raw, start_offset=float(seg["start"]))
+                                  raw_path=raw, start_offset=float(seg["start"]),
+                                  transcript=tr)
         except Exception as e:
             log(f"[thumb] skip: {e}")
         # Update meta JSON dengan path thumbnail (kalau ada)
