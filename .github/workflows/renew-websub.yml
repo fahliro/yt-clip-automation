@@ -1,0 +1,22 @@
+name: Renew YouTube WebSub Subscription
+
+on:
+  schedule:
+    - cron: "0 2 * * 0"
+  workflow_dispatch:
+
+jobs:
+  renew-websub:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Subscribe to PubSubHubbub
+        run: |
+          curl -X POST https://pubsubhubbub.appspot.com/subscribe \
+            -d "hub.mode=subscribe" \
+            -d "hub.callback=${{ secrets.WEBHOOK_URL }}/webhook" \
+            -d "hub.topic=https://www.youtube.com/xml/feeds/videos.xml?channel_id=${{ secrets.YT_CHANNEL_ID }}" \
+            -d "hub.lease_seconds=864000" \
+            -i
+
+      - name: Notify (optional)
+        run: echo "WebSub renewed! Next renewal in 7 days"
