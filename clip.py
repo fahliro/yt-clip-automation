@@ -1062,87 +1062,181 @@ def poll_latest():
 
 
 # ---------------------------------------------------------------- MAIN
+def _log_trace(e, prefix=""):
+    """Print full traceback to log so CI Actions shows exactly which step failed."""
+    import traceback
+    log(f"{prefix}ERROR: {type(e).__name__}: {e}")
+    log(f"{prefix}traceback: {traceback.format_exc().replace(chr(10), ' | ')}")
+
+
 def main():
+    log("=" * 60)
+    log("PHASE 0: START yt-clip pipeline")
+    log("=" * 60)
     video_id = os.environ.get("VIDEO_ID")
     if not video_id:
-        # cron fallback: cek video terbaru
+        log("VIDEO_ID env kosong -> cek video terbaru via API (poll_latest)")
         video_id = poll_latest()
     if not video_id:
-        # debug: hardcode ID test biar gampang jalanin tanpa set env
         video_id = TEST_VIDEO_ID
-        log(f"VIDEO_ID kosong -> pakai TEST_VIDEO_ID={video_id}")
+        log(f"VIDEO_ID tetap kosong -> pakai TEST_VIDEO_ID={video_id}")
+    else:
+        log(f"VIDEO_ID = {video_id}")
+
     if already_done(video_id):
-        log("sudah di-clip, skip"); return
-    raw = download_raw(video_id)
-    tr = transcribe(raw)
-    words = tr.get("words", [])
-    segs = pick_segments(tr)
-    upload_errors = 0
-    for i, seg in enumerate(segs[:MAX_CLIPS]):
-        clip = clip_segment(raw, seg, words, i)
-        # Detect bahasa: pakai 'language' dari Whisper response, fallback 'en'
+        log("PHASE 0: video sudah pernah di-clip (state.json match) -> SKIP")
+        return
+
+    # PHASE 1: Download raw
+    log("=" * 60)
+    log("PHASE 1/6: DOWNLOAD raw video")
+    log("=" * 60)
+    try:
+        raw = download_raw(video_id)
+        log(f"PHASE 1: OK raw={raw}")
+    except Exception as e:
+        _log_trace(e, "[phase1-download] ")
+        raise
+
+    # PHASE 2: Transcribe
+    log("=" * 60)
+    log("PHASE 2/6: TRANSCRIBE (Groq Whisper)")
+    log("=" * 60)
+    try:
+        tr = transcribe(raw)
         lang = tr.get("language", "en")
-        # Generate title/desc engaging via LLM (bhs sesuai video + emoticon)
-        title, desc = gen_title_desc(seg, tr, lang)
-        # Save title/desc ke file biar masuk artifact (untuk manual analysis)
-        meta_file = WORKDIR / f"meta_{pathlib.Path(str(clip)).stem}.json"
-        meta_file.write_text(json.dumps({
-            "seg_index": i, "title": title, "desc": desc, "lang": lang,
-            "score": seg.get("score"), "reason": seg.get("reason", ""),
-            "start": float(seg["start"]), "end": float(seg["end"]),
-            "fillers": seg.get("fillers", []),
-        }, indent=2, ensure_ascii=False), encoding="utf-8")
-        # Generate thumbnail DULU (sebelum upload) — agar masuk artifact
-        # meskipun upload ke YouTube kena quota limit.
+        words = tr.get("words", [])
+        log(f"PHASE 2: OK lang={lang} words={len(words)} durasi~={tr.get('duration', '?')}s")
+    except Exception as e:
+        _log_trace(e, "[phase2-transcribe] ")
+        raise
+
+    # PHASE 3: Pick segments
+    log("=" * 60)
+    log("PHASE 3/6: PICK SEGMENTS")
+    log("=" * 60)
+    try:
+        segs = pick_segments(tr)
+        log(f"PHASE 3: OK dapat {len(segs)} segment(s) (max MAX_CLIPS={MAX_CLIPS if 'MAX_CLIPS' in dir() else '?'})")
+        for j, s in enumerate(segs):
+            log(f"  seg[{j}]: start={float(s.get('start',0)):.1f}s end={float(s.get('end',0)):.1f}s "
+                f"score={s.get('score','?')} reason='{(s.get('reason','') or '')[:60]}'")
+    except Exception as e:
+        _log_trace(e, "[phase3-pick] ")
+        raise
+
+    upload_errors = 0
+    total_segs = len(segs[:MAX_CLIPS]) if 'MAX_CLIPS' in dir() else len(segs)
+    log(f"PHASE 4-6: loop {total_segs} segment(s)")
+
+    for i, seg in enumerate(segs[:MAX_CLIPS]):
+        log("-" * 60)
+        log(f"SEGMENT {i+1}/{total_segs}: start={float(seg['start']):.1f}s end={float(seg['end']):.1f}s")
+        log("-" * 60)
+
+        # PHASE 4a: Cut clip
+        log(f"[seg{i}] PHASE 4a/6: CUT clip (ffmpeg)")
+        try:
+            clip = clip_segment(raw, seg, words, i)
+            log(f"[seg{i}] PHASE 4a: OK clip={clip}")
+        except Exception as e:
+            _log_trace(e, f"[seg{i}-cut] ")
+            continue  # skip segment ini, lanjut ke berikutnya
+
+        # PHASE 4b: Title/desc
+        log(f"[seg{i}] PHASE 4b/6: GEN title+desc via LLM (lang={lang})")
+        try:
+            title, desc = gen_title_desc(seg, tr, lang)
+            log(f"[seg{i}] PHASE 4b: OK title='{title[:60]}' desc_len={len(desc)}")
+        except Exception as e:
+            _log_trace(e, f"[seg{i}-title] ")
+            log(f"[seg{i}] PHASE 4b: GAGAL -> fallback template")
+            title, desc = ("Kamu gak bakal nyangka! 😱", "Wajib tonton!\n\nLike ya! 💯 #shorts")
+
+        # Save meta
+        try:
+            meta_file = WORKDIR / f"meta_{pathlib.Path(str(clip)).stem}.json"
+            meta_file.write_text(json.dumps({
+                "seg_index": i, "title": title, "desc": desc, "lang": lang,
+                "score": seg.get("score"), "reason": seg.get("reason", ""),
+                "start": float(seg["start"]), "end": float(seg["end"]),
+                "fillers": seg.get("fillers", []),
+            }, indent=2, ensure_ascii=False), encoding="utf-8")
+            log(f"[seg{i}] meta saved: {meta_file}")
+        except Exception as e:
+            _log_trace(e, f"[seg{i}-meta-save] ")
+
+        # PHASE 4c: Thumbnail
+        log(f"[seg{i}] PHASE 4c/6: GEN thumbnail (frame + LLM hook + PIL/Playwright)")
         thumb = None
         try:
             thumb = gen_thumbnail(clip, seg, lang, WORKDIR,
                                   raw_path=raw, start_offset=float(seg["start"]),
                                   transcript=tr)
+            log(f"[seg{i}] PHASE 4c: OK thumb={thumb}")
         except Exception as e:
-            log(f"[thumb] skip: {e}")
-        # Update meta JSON dengan path thumbnail (kalau ada)
+            _log_trace(e, f"[seg{i}-thumb] ")
+            log(f"[seg{i}] PHASE 4c: SKIP thumbnail (lanjut upload tanpa thumb)")
+
+        # Update meta with thumb path
         if thumb:
             try:
                 meta_data = json.loads(meta_file.read_text(encoding="utf-8"))
                 meta_data["thumb"] = str(thumb)
                 meta_file.write_text(json.dumps(meta_data, indent=2, ensure_ascii=False), encoding="utf-8")
-            except Exception:
-                pass
-        # Upload ke YouTube. Kalau limit/gagal, skip tapi jangan stop pipeline
-        # (artifact clip + thumbnail sudah ke-render, bisa di-upload manual nanti).
+            except Exception as e:
+                _log_trace(e, f"[seg{i}-meta-update] ")
+
+        # PHASE 5: Upload YouTube
+        log(f"[seg{i}] PHASE 5/6: UPLOAD to YouTube")
         video_id_yt = None
         try:
             video_id_yt = upload_video(clip, title, desc)
-            save_uploaded(video_id_yt, video_id, title, str(thumb) if thumb else None)
+            log(f"[seg{i}] PHASE 5: OK uploaded video_id_yt={video_id_yt}")
+            try:
+                save_uploaded(video_id_yt, video_id, title, str(thumb) if thumb else None)
+            except Exception as e:
+                _log_trace(e, f"[seg{i}-save-uploaded] ")
         except requests.HTTPError as e:
             code = e.response.status_code if e.response else 0
             body = ""
             try: body = e.response.text[:200] if e.response else ""
             except Exception: pass
+            _log_trace(e, f"[seg{i}-upload] ")
             if "uploadLimitExceeded" in body or code in (400, 429):
-                log(f"[upload] SKIP (limit/quota) — artifact clip tetap di WORKDIR, "
-                    f"bisa di-upload manual. raw={video_id} seg={i}")
+                log(f"[seg{i}] PHASE 5: SKIP (limit/quota) — artifact clip tetap di WORKDIR")
                 upload_errors += 1
             else:
                 raise  # error lain -> stop pipeline
         except Exception as e:
-            log(f"[upload] error: {e} — artifact clip tetap di WORKDIR")
+            _log_trace(e, f"[seg{i}-upload] ")
+            log(f"[seg{i}] PHASE 5: error (non-HTTP) — artifact clip tetap di WORKDIR")
             upload_errors += 1
-        # Set thumbnail di YouTube (kalau upload sukses)
+
+        # Set thumbnail on YouTube
         if thumb and video_id_yt:
+            log(f"[seg{i}] PHASE 5b: SET thumbnail on YouTube")
             try:
                 set_thumbnail(video_id_yt, thumb)
+                log(f"[seg{i}] PHASE 5b: OK thumb set")
             except Exception as e:
-                log(f"[thumb-set] skip: {e}")
-        # Cross-post ke Meta (Facebook + Instagram Reels). Skip kalau token/env kosong.
-        # Pakai title+desc yang sama dengan YouTube.
+                _log_trace(e, f"[seg{i}-thumb-set] ")
+
+        # PHASE 6: Cross-post Meta
+        log(f"[seg{i}] PHASE 6/6: CROSS-POST Meta (FB Reels + IG Reels)")
         try:
             cross_post_meta(clip, title, desc)
+            log(f"[seg{i}] PHASE 6: OK cross-post")
         except Exception as e:
-            log(f"[meta] skip: {e}")
+            _log_trace(e, f"[seg{i}-meta-cross] ")
+            log(f"[seg{i}] PHASE 6: skip (lanjut)")
+
+    # Final
+    log("=" * 60)
+    log(f"FINAL: {total_segs} segment diproses, {upload_errors} upload error")
+    log("=" * 60)
     mark_done(video_id)
-    if upload_errors and upload_errors == len(segs[:MAX_CLIPS]):
+    if upload_errors and upload_errors == total_segs:
         log(f"SELESAI (semua upload di-skip, artifact siap di-upload manual)")
     else:
         log("SELESAI")
