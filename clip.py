@@ -353,9 +353,18 @@ def gen_title_desc(seg, transcript, lang):
         seg_text = " ".join(w["word"] for w in ws)[:800]
 
     base = os.environ.get("LLM_BASE_URL", "").rstrip("/")
+    # Kalau user override bahasa via env, pakai itu (untuk testing/rebrand)
+    lang_override = os.environ.get("META_LANG_OVERRIDE", "").strip().lower()
+    if lang_override in _LANG_NAME:
+        lang = lang_override
+        lang_name = _LANG_NAME[lang]
     prompt = (
         f"Buat title + description untuk YouTube Shorts (max 60 detik).\n"
-        f"BAHASA: pakai {lang_name} ({lang}). Kalau video bhs Indonesia -> bhs Indonesia.\n"
+        f"BAHASA OUTPUT: HARUS {lang_name} ({lang}). SELURUH title dan description "
+        f"WAJIB dalam bahasa {lang_name} dari awal sampai akhir. "
+        f"JANGAN campur dengan bahasa lain. Kalau video bhs Indonesia -> SEMUA text "
+        f"WAJIB bhs Indonesia (termasuk title dan desc). "
+        f"Kalau video bhs English -> SEMUA text WAJIB English.\n"
         f"EMOTICON: pakai 1-2 emoticon yang relevan di title, 3-5 di description.\n"
         f"POV: tulis dari sudut pandang VIEWER (yang nonton & reaction), bukan uploader.\n"
         f"  Mis. bukan 'Saya cerita tentang X' tapi 'Kamu gak bakal percaya X! 😱'\n"
@@ -384,15 +393,49 @@ def gen_title_desc(seg, transcript, lang):
             title = (data.get("title") or "").strip()[:100]
             desc = (data.get("desc") or data.get("description") or "").strip()[:4900]
             if title:
-                log(f"[title-desc] {lang} -> '{title[:60]}'")
-                return title, desc
+                # Validasi bahasa: cek apakah LLM output match dengan target lang.
+                # Pakai heuristic sederhana: kalau lang=='id' tapi title mengandung
+                # 5+ English stopwords -> reject & fallback.
+                if not _lang_matches(title + " " + desc, lang):
+                    log(f"[title-desc] LLM output gak match lang={lang} -> fallback template")
+                else:
+                    log(f"[title-desc] {lang} -> '{title[:60]}'")
+                    return title, desc
     except Exception as e:
         log(f"[title-desc] LLM error: {e} -> fallback")
-    # Fallback kalau LLM gagal
+    # Fallback kalau LLM gagal / output gak match bahasa
     score = seg.get("score", "?")
-    title = f"Clip #{seg.get('idx', '')} - score {score} {('🔥' if lang == 'id' else '🔥')}"
-    desc = seg.get("reason", "")
+    if lang == "id":
+        title = f"Kamu gak bakal nyangka! 😱 Skor {score} 🔥"
+        desc = (seg.get("reason") or "Wajib tonton!") + "\n\nLike ya! 💯 #shorts"
+    else:
+        title = f"You won't believe this! 😱 Score {score} 🔥"
+        desc = (seg.get("reason") or "Must watch!") + "\n\nLike & share! 💯 #shorts"
     return title[:100], desc[:4900]
+
+
+# Heuristic sederhana: deteksi apakah text dalam bahasa target.
+# Bukan sempurna, tapi cukup untuk filter LLM yang ngirim English padahal
+# target Indonesian (atau sebaliknya).
+_EN_STOP = {" the ", " is ", " are ", " was ", " you ", " your ", " this ", " that ",
+            " with ", " for ", " from ", " have ", " has ", " and ", " but ", " not ",
+            " they ", " them ", " what ", " when ", " will ", " would ", " about ",
+            " can ", " just ", " like ", " make ", " made "}
+_ID_STOP = {" yang ", " ini ", " itu ", " untuk ", " dengan ", " dari ", " sudah ",
+            " sudah ", " akan ", " tidak ", " bukan ", " juga ", " saja ", " kalau ",
+            " karena ", " tapi ", " sudah ", " belum ", " bisa ", " telah ", " bahwa ",
+            " gimana ", " kenapa ", " banget ", " udah ", " aja ", " gak ", " nggak "}
+def _lang_matches(text, lang):
+    t = " " + text.lower() + " "
+    if lang == "id":
+        en = sum(1 for w in _EN_STOP if w in t)
+        id_ = sum(1 for w in _ID_STOP if w in t)
+        return id_ >= en  # lebih banyak id_ stopwords = match
+    elif lang == "en":
+        en = sum(1 for w in _EN_STOP if w in t)
+        id_ = sum(1 for w in _ID_STOP if w in t)
+        return en >= id_  # lebih banyak en stopwords = match
+    return True  # bahasa lain, gak validasi
 
 
 # ---------------------------------------------------------------- 4d. THUMBNAIL
