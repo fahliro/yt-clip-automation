@@ -10,7 +10,8 @@ crons = ["0 0 * * 0"]
 # Semua secret diisi via: wrangler secret put NAMA
 # (jangan commit ke repo)
 [vars]
-CHANNEL_ID = "GANTI_DENGAN_CHANNEL_ID_KAMU"   # bisa di-hardcode aman (bukan rahasia)
+CHANNEL_ID = "UCZrcvNC4i1AKf-uiEWZFaZg"   # dari Shorts yg sudah di-upload 2026-09-02
+                                       # (bukan rahasia, hardcode aman)
 HUB_CALLBACK_PATH = "/webhook"                # path endpoint di worker ini
 
 # Secret (wrangler secret put):
