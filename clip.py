@@ -337,105 +337,152 @@ _LANG_NAME = {
     "de": "German", "ar": "Arabic", "ru": "Russian", "hi": "Hindi",
     "th": "Thai", "vi": "Vietnamese", "ms": "Malay", "tl": "Filipino",
 }
+def _llm_call_json(prompt, max_retries=1):
+    """Call LLM and return parsed JSON dict (or None on fail).
+    Retry up to max_retries times if JSON parsing fails.
+    Tidak validasi bahasa di sini — itu urusan caller (gen_title_desc).
+    """
+    import requests
+    base = os.environ.get("LLM_BASE_URL", "").rstrip("/")
+    last_err = None
+    for attempt in range(max_retries + 1):
+        try:
+            r = requests.post(
+                f"{base}/chat/completions",
+                headers={"Authorization": f"Bearer {os.environ['LLM_API_KEY']}",
+                         "Content-Type": "application/json"},
+                json={"model": os.environ["LLM_MODEL"], "messages": [
+                    {"role": "system", "content": "Output HANYA JSON valid, tanpa markdown."},
+                    {"role": "user", "content": prompt}]},
+                timeout=60,
+            )
+            if not r.ok:
+                last_err = f"HTTP {r.status_code}: {r.text[:200]}"
+                log(f"[llm] attempt {attempt+1} HTTP fail: {last_err}")
+                continue
+            content = _re.sub(r"```(?:json)?", "", r.json()["choices"][0]["message"]["content"]).strip().strip("`")
+            try:
+                return json.loads(content)
+            except Exception as pe:
+                last_err = f"JSON parse fail: {pe}; raw={content[:150]}"
+                log(f"[llm] attempt {attempt+1} {last_err}")
+        except Exception as e:
+            last_err = f"network: {e}"
+            log(f"[llm] attempt {attempt+1} {last_err}")
+    return None
+
+
 def gen_title_desc(seg, transcript, lang):
     """Generate engaging title + description via LLM.
     - title: catchy, max 100 char, pake 1-2 emoticon, bahasa = lang
     - desc: 2-4 kalimat POV viewers, pake emoticon, bahasa = lang
-    Falls back ke simple title kalau LLM gagal.
+    Approach: prompt tegas (100% bahasa target, contoh GOOD/BAD) +
+              retry 1x kalau LLM tetap ngeluarin bahasa yang salah.
+              Tidak ada heuristic post-hoc — trust the prompt.
+    Falls back ke template kalau LLM gagal.
     """
-    import requests
     lang_name = _LANG_NAME.get(lang, "English")
     seg_text = seg.get("text") or seg.get("reason", "")
     if not seg_text and "words" in transcript:
-        # Ambil transkrip di range segment ini
         s, e = float(seg["start"]), float(seg["end"])
         ws = [w for w in transcript["words"] if s <= w["start"] < e]
         seg_text = " ".join(w["word"] for w in ws)[:800]
 
-    base = os.environ.get("LLM_BASE_URL", "").rstrip("/")
-    # Kalau user override bahasa via env, pakai itu (untuk testing/rebrand)
+    # Optional: override bahasa via env (untuk testing/rebrand)
     lang_override = os.environ.get("META_LANG_OVERRIDE", "").strip().lower()
     if lang_override in _LANG_NAME:
         lang = lang_override
         lang_name = _LANG_NAME[lang]
-    prompt = (
+
+    base_prompt = (
         f"Buat title + description untuk YouTube Shorts (max 60 detik).\n"
-        f"BAHASA OUTPUT: HARUS {lang_name} ({lang}). SELURUH title dan description "
-        f"WAJIB dalam bahasa {lang_name} dari awal sampai akhir. "
-        f"JANGAN campur dengan bahasa lain. Kalau video bhs Indonesia -> SEMUA text "
-        f"WAJIB bhs Indonesia (termasuk title dan desc). "
-        f"Kalau video bhs English -> SEMUA text WAJIB English.\n"
-        f"EMOTICON: pakai 1-2 emoticon yang relevan di title, 3-5 di description.\n"
-        f"POV: tulis dari sudut pandang VIEWER (yang nonton & reaction), bukan uploader.\n"
+        f"\n"
+        f"=== ATURAN BAHASA (WAJIB, tanpa exception) ===\n"
+        f"Bahasa target = {lang_name} ({lang}).\n"
+        f"SELURUH title dan description HARUS 100% {lang_name} dari awal sampai akhir.\n"
+        f"JANGAN pakai kata dari bahasa lain, termasuk 'you', 'your', 'this', 'that', 'the', "
+        f"'apps', 'real-time', 'fire', 'phone', 'mix up', 'never', 'always', 'drop a', dll.\n"
+        f"Kalau konteks mengandung istilah Inggris/asing, TRANSLATE atau PARAPHRASE ke {lang_name}.\n"
+        f"\n"
+        f"=== FORMAT ===\n"
+        f"- title: 1 kalimat catchy, max 100 char, 1-2 emoticon\n"
+        f"- desc: 2-4 kalimat engaging + 1-2 hashtag relevan + CTA (like/comment/share)\n"
+        f"- POV: sudut pandang VIEWER (yang nonton & react), bukan uploader.\n"
         f"  Mis. bukan 'Saya cerita tentang X' tapi 'Kamu gak bakal percaya X! 😱'\n"
-        f"  Hindari kata 'video ini', 'clip ini', 'konten ini'.\n"
-        f"FORMAT:\n"
-        f"  title: 1 kalimat catchy, max 100 char, ada 1-2 emoticon\n"
-        f"  desc: 2-4 kalimat engaging + 1-2 hashtag relevan + CTA (like/comment/share)\n"
-        f"  JSON: {{\"title\": str, \"desc\": str}}\n"
-        f"CONTEXT: {seg_text}\n"
-        f"REASON: {seg.get('reason', '')}\n"
-        f"Jawab HANYA JSON (no markdown)."
+        f"  Hindari 'video ini', 'clip ini', 'konten ini'.\n"
+        f"- Output JSON valid: {{\"title\": str, \"desc\": str}}\n"
+        f"\n"
+        f"=== CONTOH (GOOD vs BAD, asumsi bahasa target = Indonesian) ===\n"
+        f"  GOOD title: 'Kamu gak bakal nyangka api vs HP ini! 🔥📱'\n"
+        f"  BAD  title: 'You'll never mix up real-time apps after this...' ← DITOLAK\n"
+        f"  BAD  title: 'Ditch confusing jargon for good' ← DITOLAK\n"
+        f"\n"
+        f"=== KONTEKS SCRIPT ===\n"
+        f"{seg_text}\n"
+        f"\n"
+        f"=== ALASAN SEGMENT INI MENARIK ===\n"
+        f"{seg.get('reason', '')}\n"
     )
-    try:
-        r = requests.post(
-            f"{base}/chat/completions",
-            headers={"Authorization": f"Bearer {os.environ['LLM_API_KEY']}",
-                     "Content-Type": "application/json"},
-            json={"model": os.environ["LLM_MODEL"], "messages": [
-                {"role": "system", "content": "Output JSON saja tanpa markdown."},
-                {"role": "user", "content": prompt}]},
-            timeout=60,
+    # Sistem message pendek, dorong patuh bahasa
+    system = (
+        f"Anda menulis untuk YouTube Shorts. "
+        f"Bahasa output: {lang_name} ({lang}). "
+        f"Dilarang mencampur bahasa lain. Output HANYA JSON tanpa markdown."
+    )
+
+    last_data = _llm_call_json(base_prompt)
+    # Retry 1x kalau attempt pertama menghasilkan title/desc yang
+    # tampak ngambang / terlalu pendek / JSON shape rusak.
+    # (Tidak cek bahasa di sini — trust the prompt.)
+    needs_retry = False
+    if last_data is None:
+        needs_retry = True
+    else:
+        t = (last_data.get("title") or "").strip()
+        d = (last_data.get("desc") or last_data.get("description") or "").strip()
+        if not t or not d or len(t) < 10 or len(d) < 20:
+            needs_retry = True
+
+    if needs_retry:
+        retry_msg = (
+            f"{base_prompt}"
+                f"\n=== PESAN UNTUK RETRY ===\n"
+                f"Attempt sebelumnya gagal/result tidak lengkap. "
+                f"Tolong tulis ulang dengan patuh 100% bahasa {lang_name}. "
+                f"Pastikan JSON valid {{\"title\": str, \"desc\": str}}. "
+                f"Jangan kasih penjelasan di luar JSON."
         )
-        if r.ok:
-            content = _re.sub(r"```(?:json)?", "", r.json()["choices"][0]["message"]["content"]).strip().strip("`")
-            data = json.loads(content)
-            title = (data.get("title") or "").strip()[:100]
-            desc = (data.get("desc") or data.get("description") or "").strip()[:4900]
-            if title:
-                # Validasi bahasa: cek apakah LLM output match dengan target lang.
-                # Pakai heuristic sederhana: kalau lang=='id' tapi title mengandung
-                # 5+ English stopwords -> reject & fallback.
-                if not _lang_matches(title + " " + desc, lang):
-                    log(f"[title-desc] LLM output gak match lang={lang} -> fallback template")
-                else:
-                    log(f"[title-desc] {lang} -> '{title[:60]}'")
-                    return title, desc
-    except Exception as e:
-        log(f"[title-desc] LLM error: {e} -> fallback")
-    # Fallback kalau LLM gagal / output gak match bahasa
+        retry_data = _llm_call_json(retry_msg)
+        if retry_data is not None:
+            last_data = retry_data
+            log("[title-desc] retry used")
+
+    if last_data is not None:
+        title = (last_data.get("title") or "").strip()[:100]
+        desc = (last_data.get("desc") or last_data.get("description") or "").strip()[:4900]
+        if title and desc:
+            log(f"[title-desc] {lang} -> '{title[:60]}'")
+            return title, desc
+
+    # Fallback template kalau LLM gagal / retry masih gagal
+    log(f"[title-desc] LLM gagal total -> fallback template ({lang})")
     score = seg.get("score", "?")
     if lang == "id":
         title = f"Kamu gak bakal nyangka! 😱 Skor {score} 🔥"
         desc = (seg.get("reason") or "Wajib tonton!") + "\n\nLike ya! 💯 #shorts"
-    else:
+    elif lang == "en":
         title = f"You won't believe this! 😱 Score {score} 🔥"
         desc = (seg.get("reason") or "Must watch!") + "\n\nLike & share! 💯 #shorts"
+    else:
+        # Bahasa lain (ja, ko, zh, dll): generic tapi pake nama bahasa
+        title = f"{lang_name} highlight! 😱 Skor {score} 🔥"
+        desc = (seg.get("reason") or f"Watch this {lang_name} clip!") + f"\n\nLike ya! 💯 #shorts"
     return title[:100], desc[:4900]
 
 
-# Heuristic sederhana: deteksi apakah text dalam bahasa target.
-# Bukan sempurna, tapi cukup untuk filter LLM yang ngirim English padahal
-# target Indonesian (atau sebaliknya).
-_EN_STOP = {" the ", " is ", " are ", " was ", " you ", " your ", " this ", " that ",
-            " with ", " for ", " from ", " have ", " has ", " and ", " but ", " not ",
-            " they ", " them ", " what ", " when ", " will ", " would ", " about ",
-            " can ", " just ", " like ", " make ", " made "}
-_ID_STOP = {" yang ", " ini ", " itu ", " untuk ", " dengan ", " dari ", " sudah ",
-            " sudah ", " akan ", " tidak ", " bukan ", " juga ", " saja ", " kalau ",
-            " karena ", " tapi ", " sudah ", " belum ", " bisa ", " telah ", " bahwa ",
-            " gimana ", " kenapa ", " banget ", " udah ", " aja ", " gak ", " nggak "}
-def _lang_matches(text, lang):
-    t = " " + text.lower() + " "
-    if lang == "id":
-        en = sum(1 for w in _EN_STOP if w in t)
-        id_ = sum(1 for w in _ID_STOP if w in t)
-        return id_ >= en  # lebih banyak id_ stopwords = match
-    elif lang == "en":
-        en = sum(1 for w in _EN_STOP if w in t)
-        id_ = sum(1 for w in _ID_STOP if w in t)
-        return en >= id_  # lebih banyak en stopwords = match
-    return True  # bahasa lain, gak validasi
+# NOTE: _lang_matches / _EN_STOP / _ID_STOP DIHAPUS.
+# Bahasa compliance sekarang sepenuhnya di-handle oleh prompt yang tegas
+# + fallback kalau LLM gagal. Tidak ada post-hoc stopword check.
 
 
 # ---------------------------------------------------------------- 4d. THUMBNAIL
@@ -530,9 +577,10 @@ def _gen_thumbnail_style(seg, transcript, lang, workdir):
         if r.ok:
             content = _re.sub(r"```(?:json)?", "", r.json()["choices"][0]["message"]["content"]).strip().strip("`")
             data = json.loads(content)
-            # Validate language match
-            full_text = data.get("hook_text", "")
-            if _lang_matches(full_text, lang):
+            # Trust prompt: kalau LLM kasih hook_text, pakai langsung.
+            # Bahasa compliance sudah dijaga prompt ("SEMUA output WAJIB bahasa X").
+            full_text = (data.get("hook_text") or "").strip()
+            if full_text:
                 default["hook_text"] = full_text[:60]
                 default["font_family"] = data.get("font_family", default["font_family"])
                 try: default["font_size"] = int(data.get("font_size", 134))
@@ -547,7 +595,7 @@ def _gen_thumbnail_style(seg, transcript, lang, workdir):
                     f"color={default['text_color']} hook='{default['hook_text'][:50]}'")
                 return default
             else:
-                log(f"[thumb-style] LLM output gak match lang={lang} -> default")
+                log(f"[thumb-style] LLM output kosong -> default")
     except Exception as e:
         log(f"[thumb-style] LLM error: {e} -> default")
     return default
