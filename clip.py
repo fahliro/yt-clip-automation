@@ -325,6 +325,75 @@ def concat_parts(parts, idx):
     return final
 
 
+# ---------------------------------------------------------------- 4c. TITLE/DESC
+# Generate title + description engaging (POV viewers, pake emoticon,
+# bahasa sesuai video). Pake LLM yang sama dengan pick_segments.
+# Returns: (title, description) — title max 100 char, desc max 4900 char.
+import re as _re
+_LANG_NAME = {
+    "id": "Indonesian", "en": "English", "ja": "Japanese", "ko": "Korean",
+    "zh": "Chinese", "es": "Spanish", "pt": "Portuguese", "fr": "French",
+    "de": "German", "ar": "Arabic", "ru": "Russian", "hi": "Hindi",
+    "th": "Thai", "vi": "Vietnamese", "ms": "Malay", "tl": "Filipino",
+}
+def gen_title_desc(seg, transcript, lang):
+    """Generate engaging title + description via LLM.
+    - title: catchy, max 100 char, pake 1-2 emoticon, bahasa = lang
+    - desc: 2-4 kalimat POV viewers, pake emoticon, bahasa = lang
+    Falls back ke simple title kalau LLM gagal.
+    """
+    import requests
+    lang_name = _LANG_NAME.get(lang, "English")
+    seg_text = seg.get("text") or seg.get("reason", "")
+    if not seg_text and "words" in transcript:
+        # Ambil transkrip di range segment ini
+        s, e = float(seg["start"]), float(seg["end"])
+        ws = [w for w in transcript["words"] if s <= w["start"] < e]
+        seg_text = " ".join(w["word"] for w in ws)[:800]
+
+    base = os.environ.get("LLM_BASE_URL", "").rstrip("/")
+    prompt = (
+        f"Buat title + description untuk YouTube Shorts (max 60 detik).\n"
+        f"BAHASA: pakai {lang_name} ({lang}). Kalau video bhs Indonesia -> bhs Indonesia.\n"
+        f"EMOTICON: pakai 1-2 emoticon yang relevan di title, 3-5 di description.\n"
+        f"POV: tulis dari sudut pandang VIEWER (yang nonton & reaction), bukan uploader.\n"
+        f"  Mis. bukan 'Saya cerita tentang X' tapi 'Kamu gak bakal percaya X! 😱'\n"
+        f"  Hindari kata 'video ini', 'clip ini', 'konten ini'.\n"
+        f"FORMAT:\n"
+        f"  title: 1 kalimat catchy, max 100 char, ada 1-2 emoticon\n"
+        f"  desc: 2-4 kalimat engaging + 1-2 hashtag relevan + CTA (like/comment/share)\n"
+        f"  JSON: {{\"title\": str, \"desc\": str}}\n"
+        f"CONTEXT: {seg_text}\n"
+        f"REASON: {seg.get('reason', '')}\n"
+        f"Jawab HANYA JSON (no markdown)."
+    )
+    try:
+        r = requests.post(
+            f"{base}/chat/completions",
+            headers={"Authorization": f"Bearer {os.environ['LLM_API_KEY']}",
+                     "Content-Type": "application/json"},
+            json={"model": os.environ["LLM_MODEL"], "messages": [
+                {"role": "system", "content": "Output JSON saja tanpa markdown."},
+                {"role": "user", "content": prompt}]},
+            timeout=60,
+        )
+        if r.ok:
+            content = _re.sub(r"```(?:json)?", "", r.json()["choices"][0]["message"]["content"]).strip().strip("`")
+            data = json.loads(content)
+            title = (data.get("title") or "").strip()[:100]
+            desc = (data.get("desc") or data.get("description") or "").strip()[:4900]
+            if title:
+                log(f"[title-desc] {lang} -> '{title[:60]}'")
+                return title, desc
+    except Exception as e:
+        log(f"[title-desc] LLM error: {e} -> fallback")
+    # Fallback kalau LLM gagal
+    score = seg.get("score", "?")
+    title = f"Clip #{seg.get('idx', '')} - score {score} {('🔥' if lang == 'id' else '🔥')}"
+    desc = seg.get("reason", "")
+    return title[:100], desc[:4900]
+
+
 # ---------------------------------------------------------------- 5. UPLOAD
 def upload_video(path, title, description):
     import requests, time
@@ -432,8 +501,10 @@ def main():
     segs = pick_segments(tr)
     for i, seg in enumerate(segs[:MAX_CLIPS]):
         clip = clip_segment(raw, seg, words, i)
-        title = f"Clip #{i+1} - score {seg.get('score','?')}"
-        desc = seg.get("reason", "")
+        # Detect bahasa: pakai 'language' dari Whisper response, fallback 'en'
+        lang = tr.get("language", "en")
+        # Generate title/desc engaging via LLM (bhs sesuai video + emoticon)
+        title, desc = gen_title_desc(seg, tr, lang)
         upload_video(clip, title, desc)
     mark_done(video_id)
     log("SELESAI")
