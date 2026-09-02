@@ -794,6 +794,14 @@ def main():
         lang = tr.get("language", "en")
         # Generate title/desc engaging via LLM (bhs sesuai video + emoticon)
         title, desc = gen_title_desc(seg, tr, lang)
+        # Save title/desc ke file biar masuk artifact (untuk manual analysis)
+        meta_file = WORKDIR / f"meta_{pathlib.Path(str(clip)).stem}.json"
+        meta_file.write_text(json.dumps({
+            "seg_index": i, "title": title, "desc": desc, "lang": lang,
+            "score": seg.get("score"), "reason": seg.get("reason", ""),
+            "start": float(seg["start"]), "end": float(seg["end"]),
+            "fillers": seg.get("fillers", []),
+        }, indent=2, ensure_ascii=False), encoding="utf-8")
         # Upload ke YouTube. Kalau limit/gagal, skip tapi jangan stop pipeline
         # (artifact clip + thumbnail sudah ke-render, bisa di-upload manual nanti).
         video_id_yt = None
