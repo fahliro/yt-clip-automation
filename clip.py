@@ -35,7 +35,13 @@ def run(cmd, log_stderr=False):
     r = subprocess.run(cmd, capture_output=True, text=True)
     if log_stderr or r.returncode != 0:
         # Selalu log stderr kalau ffmpeg: membantu debug subtitle silent-skip.
-        log(f"stderr_tail: {r.stderr[-500:] if r.stderr else '(empty)'}")
+        # Print FULL stderr, bukan tail 500, supaya bisa lihat baris
+        # 'Parsed_subtitles_4' / 'fontselect' yang biasanya di awal log.
+        stderr_full = r.stderr or "(empty)"
+        if "subtitles" in str(cmd) or log_stderr:
+            log(f"stderr_full ({len(stderr_full)} chars):\n{stderr_full}")
+        else:
+            log(f"stderr_tail: {stderr_full[-500:]}")
     if r.returncode != 0:
         log(f"ERROR: {r.stderr[-2000:]}")
         raise SystemExit(f"command failed: {cmd[0]}")
