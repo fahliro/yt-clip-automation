@@ -434,13 +434,26 @@ def gen_title_desc(seg, transcript, lang):
     # Retry 1x kalau attempt pertama menghasilkan title/desc yang
     # tampak ngambang / terlalu pendek / JSON shape rusak.
     # (Tidak cek bahasa di sini — trust the prompt.)
+    # English stopword umum yang sering muncul di output LLM bandel.
+    # Bukan validator sempurna — cuma tripwire supaya LLM dikasih
+    # kesempatan 1x retry kalau attempt pertama jelas English.
+    _EN_TRIPWIRE = (" the ", " you ", " your ", " this ", " that ", " will ",
+                    " never ", " always ", " believe ", " really ", " watch ",
+                    " you'll ", " won't ", " can't ", " don't ", " amazing ")
+    def _looks_english(text):
+        text_lower = " " + (text or "").lower() + " "
+        return sum(1 for w in _EN_TRIPWIRE if w in text_lower) >= 3
+
     needs_retry = False
     if last_data is None:
         needs_retry = True
     else:
-        t = (last_data.get("title") or "").strip()
-        d = (last_data.get("desc") or last_data.get("description") or "").strip()
-        if not t or not d or len(t) < 10 or len(d) < 20:
+        t_text = (last_data.get("title") or "").strip()
+        d_text = (last_data.get("desc") or last_data.get("description") or "").strip()
+        if not t_text or not d_text or len(t_text) < 10 or len(d_text) < 20:
+            needs_retry = True
+        elif _looks_english(t_text + " " + d_text):
+            log(f"[title-desc] output English detected -> retry")
             needs_retry = True
 
     if needs_retry:
@@ -461,8 +474,13 @@ def gen_title_desc(seg, transcript, lang):
         title = (last_data.get("title") or "").strip()[:100]
         desc = (last_data.get("desc") or last_data.get("description") or "").strip()[:4900]
         if title and desc:
-            log(f"[title-desc] {lang} -> '{title[:60]}'")
-            return title, desc
+            # Final tripwire: kalau setelah retry output masih English,
+            # reject dan fallback ke template (gak ambil risiko upload English).
+            if _looks_english(title + " " + desc):
+                log(f"[title-desc] FINAL output still English after retry -> fallback")
+            else:
+                log(f"[title-desc] {lang} -> '{title[:60]}'")
+                return title, desc
 
     # Fallback template kalau LLM gagal / retry masih gagal
     log(f"[title-desc] LLM gagal total -> fallback template ({lang})")
@@ -480,9 +498,7 @@ def gen_title_desc(seg, transcript, lang):
     return title[:100], desc[:4900]
 
 
-# NOTE: _lang_matches / _EN_STOP / _ID_STOP DIHAPUS.
-# Bahasa compliance sekarang sepenuhnya di-handle oleh prompt yang tegas
-# + fallback kalau LLM gagal. Tidak ada post-hoc stopword check.
+
 
 
 # ---------------------------------------------------------------- 4d. THUMBNAIL
