@@ -195,15 +195,17 @@ def pick_segments(transcript):
 def build_ass(words, out_path):
     # Font: pakai DejaVu Sans (built-in di Ubuntu runner GitHub Actions).
     # Arial sering gak ada di Linux -> ffmpeg skip render tanpa error, subtitle kosong.
-    # Position: bottom-center, font besar (28) untuk Shorts 9:16.
-    # Vision: subtitle terlalu kecil + terlalu atas. MarginV=180 dari
-    # bawah-frame (1920 - 180 = y=1740, area subtitle). Bold=1, Outline=3
-    # untuk kontras di atas background apapun.
-    # warna: &H00FFFFFF = putih; outline &H00000000 = hitam
+    # Position: bottom area, aman dari UI platform (TikTok/Reels/Shorts).
+    #   - 20% dari bawah -> MarginV=384 (1920-1536=384)
+    #     Subtitle di y=1536-1632, di atas tombol like/comment/share/nama akun
+    #   - FontSize 115 = 6% dari tinggi frame 1920 (range target 5-8%)
+    #     -> readable, gak nutupin subjek video
+    #   - Outline=4, Shadow=1 untuk kontras di atas background blur apapun
+    # warna: &H00FFFFFF = putih; outline &H00000000 = hitam; Bold=1
     # Format fields (22): Name,Font,Size,PCol,SCol,OCol,B,I,U,S,SX,SY,Sp,Ang,
     #   BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
-    style = ("Style: Default,DejaVu Sans,28,&H00FFFFFF,&H000000FF,&H00000000,"
-             "1,0,0,0,100,100,0,0,1,3,0,2,20,20,180,1")
+    style = ("Style: Default,DejaVu Sans,115,&H00FFFFFF,&H000000FF,&H00000000,"
+             "1,0,0,0,100,100,0,0,1,4,1,2,20,20,384,1")
     lines = [
         "[Script Info]", "ScriptType: v4.00+", "PlayResX: 1080", "PlayResY: 1920", "",
         "[V4+ Styles]",
