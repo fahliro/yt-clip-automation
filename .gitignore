@@ -12,3 +12,7 @@ concat_*.txt
 
 # cookies base64 (SECRET - jangan di-commit)
 yt_cookies_b64.txt
+
+# wrangler local config & temp (deploy cache, secret, etc)
+.wrangler/
+.hermes-tmp.*
