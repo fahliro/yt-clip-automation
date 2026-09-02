@@ -195,8 +195,15 @@ def pick_segments(transcript):
 def build_ass(words, out_path):
     # Font: pakai DejaVu Sans (built-in di Ubuntu runner GitHub Actions).
     # Arial sering gak ada di Linux -> ffmpeg skip render tanpa error, subtitle kosong.
-    # warna: &H00FFFFFF = putih; outline &H00000000 = hitam; Bold=1; Align=2 bawah-tengah
-    style = ("Style: Default,DejaVu Sans,22,&H00FFFFFF,&H000000FF,&H00000000,1,0,0,0,100,100,0,0,2,20,20,300,1")
+    # Position: top-center (Alignment=8 di libass numeric).
+    # Sebelumnya Alignment=2 (bottom-center) -> vision confirm subtitle
+    # nongol di pojok kanan-atas (libass fallback top). Force Alignment=8
+    # eksplisit + MarginV=80 untuk jarak dari atas.
+    # warna: &H00FFFFFF = putih; outline &H00000000 = hitam; Bold=1
+    # Format fields (22): Name,Font,Size,PCol,SCol,OCol,B,I,U,S,SX,SY,Sp,Ang,
+    #   BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
+    style = ("Style: Default,DejaVu Sans,22,&H00FFFFFF,&H000000FF,&H00000000,"
+             "1,0,0,0,100,100,0,0,1,2,0,8,20,20,80,1")
     lines = [
         "[Script Info]", "ScriptType: v4.00+", "PlayResX: 1080", "PlayResY: 1920", "",
         "[V4+ Styles]",
