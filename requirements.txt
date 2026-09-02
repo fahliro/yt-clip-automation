@@ -1,3 +1,5 @@
 # Pin versi teruji. Update manual kalau YouTube break yt-dlp (lihat README).
 yt-dlp==2026.08.19
 requests>=2.31.0
+# Untuk thumbnail generator (gen_thumbnail -> PIL Image, ImageDraw, ImageFont)
+Pillow>=10.0.0

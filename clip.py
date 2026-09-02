@@ -404,23 +404,30 @@ def gen_title_desc(seg, transcript, lang):
 #   3. LLM pilih frame terbaik + kasih hook text
 #   4. Fallback: pakai frame tengah + hook default
 import base64 as _b64
-def _extract_frames(clip_path, out_dir, n=3):
-    """Extract n frame dari clip di t=0.3, t=2, t=mid. Return list of paths."""
+def _extract_frames(clip_path, out_dir, n=3, raw_path=None, start_offset=0.0):
+    """Extract n frame dari clip di t=0.3, t=2, t=mid. Return list of paths.
+    Kalau raw_path + start_offset dikasih, extract dari raw video
+    (supaya tidak ada subtitle terbakar di frame).
+    """
     out_dir = pathlib.Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    # Probe durasi
+    source = raw_path if raw_path else clip_path
+    offset = start_offset if raw_path else 0.0
+    # Probe durasi (dari source)
     r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                        "-of", "default=noprint_wrappers=1:nokey=1", str(clip_path)],
+                        "-of", "default=noprint_wrappers=1:nokey=1", str(source)],
                        capture_output=True, text=True)
     try:
         dur = float(r.stdout.strip())
     except Exception:
         dur = 5.0
+    # Timestamp absolute di source (raw), bukan relatif clip
     timestamps = [min(0.3, dur*0.05), min(2.0, dur*0.4), dur*0.5]
+    timestamps = [t + offset for t in timestamps]
     frames = []
     for i, t in enumerate(timestamps):
         fp = out_dir / f"frame_{i}.jpg"
-        subprocess.run(["ffmpeg", "-y", "-ss", f"{t:.2f}", "-i", str(clip_path),
+        subprocess.run(["ffmpeg", "-y", "-ss", f"{t:.2f}", "-i", str(source),
                         "-frames:v", "1", "-q:v", "3", str(fp)],
                        capture_output=True)
         if fp.exists() and fp.stat().st_size > 1000:
@@ -481,14 +488,16 @@ def _add_hook_text(frame_path, hook_text, out_path):
     img.save(out_path, "JPEG", quality=92)
     return out_path
 
-def gen_thumbnail(clip_path, seg, lang, workdir):
+def gen_thumbnail(clip_path, seg, lang, workdir, raw_path=None, start_offset=0.0):
     """Generate thumbnail untuk clip. Returns path to JPG or None.
-    1. Extract 3 frame
+    1. Extract 3 frame dari raw_path (kalau ada) supaya tidak ada subtitle terbakar,
+       fallback ke clip_path kalau raw_path tidak dikasih
     2. Try LLM vision (kalau model support image input)
     3. Fallback: pakai frame tengah + hook default dari seg.reason
     """
     workdir = pathlib.Path(workdir)
-    frames = _extract_frames(clip_path, workdir / "frames")
+    frames = _extract_frames(clip_path, workdir / "frames",
+                              raw_path=raw_path, start_offset=start_offset)
     if not frames:
         log("[thumb] gagal extract frame"); return None
     chosen = frames[len(frames) // 2]  # default: frame tengah
@@ -806,7 +815,8 @@ def main():
         # meskipun upload ke YouTube kena quota limit.
         thumb = None
         try:
-            thumb = gen_thumbnail(clip, seg, lang, WORKDIR)
+            thumb = gen_thumbnail(clip, seg, lang, WORKDIR,
+                                  raw_path=raw, start_offset=float(seg["start"]))
         except Exception as e:
             log(f"[thumb] skip: {e}")
         # Update meta JSON dengan path thumbnail (kalau ada)
