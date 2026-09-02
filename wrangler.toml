@@ -4,6 +4,11 @@ compatibility_date = "2025-01-01"
 
 # Cron: tiap Minggu 00:00 UTC -> renew WebSub subscription (lease Google ~10 hari,
 # renew 7 hari kasih buffer 3 hari sebelum kedaluwarsa).
+# Cloudflare Workers Crons format 5-field Unix-like (menit, jam, DOM, bulan, DOW).
+# Hari 0=Minggu, 1=Senin, ..., 6=Sabtu. (Dokumentasi: https://developers.cloudflare.com/workers/configuration/cron-triggers/)
+#   "0 0 * * 0" = menit 0, jam 0, *, *, DOW 0 (Minggu)
+# NOTE: wrangler 4.128 kadang reject format ini. Worker akan auto-renew via
+# renewSubscription() yang dipanggil dari scheduled handler setiap minggu.
 [triggers]
 crons = ["0 0 * * 0"]
 
@@ -12,6 +17,7 @@ crons = ["0 0 * * 0"]
 [vars]
 CHANNEL_ID = "UCZrcvNC4i1AKf-uiEWZFaZg"   # dari Shorts yg sudah di-upload 2026-09-02
                                        # (bukan rahasia, hardcode aman)
+WORKER_URL = "https://yt-clip-webhook.fadlicode-mail.workers.dev"  # URL Worker (deploy output)
 HUB_CALLBACK_PATH = "/webhook"                # path endpoint di worker ini
 
 # Secret (wrangler secret put):
