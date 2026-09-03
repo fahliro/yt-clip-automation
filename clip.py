@@ -167,12 +167,14 @@ def pick_segments(transcript):
         if w["end"] - t >= 5:
             chunks.append(f"[{t:.0f}s] " + " ".join(buf))
             t, buf = w["end"], []
-    # Prompt standar English (sesuai preferensi user). Placeholder {lang_name}/{lang}
-    # diisi runtime dari hasil Whisper.
+    # Prompt standar English (sesuai preferensi user). Placeholder bahasa
+    # diisi runtime dari hasil Whisper (parameter `transcript` di fungsi ini,
+    # BUKAN `data` -- itu scope di dalam transcribe()).
+    transcript_lang = transcript.get("language", "unknown")
     transcript_for_llm = (
         "You are a short-form video editor. From the following timestamped "
         "transcript, pick 3-8 interesting segments for YouTube Shorts.\n"
-        f"TRANSCRIPT LANGUAGE: {data.get('language', 'unknown')}. "
+        f"TRANSCRIPT LANGUAGE: {transcript_lang}. "
         "Detect segments based on the transcript language -- do not translate.\n"
         "DURATION: each segment MUST be 25-45 seconds. If a funny moment is <25s, "
         "merge it with before/after context until 25-45s. If >45s, pick the "
