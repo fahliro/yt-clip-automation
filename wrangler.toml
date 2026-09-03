@@ -2,15 +2,11 @@ name = "yt-clip-webhook"
 main = "worker.js"
 compatibility_date = "2025-01-01"
 
-# Cron: tiap Minggu 00:00 UTC -> renew WebSub subscription (lease Google ~10 hari,
-# renew 7 hari kasih buffer 3 hari sebelum kedaluwarsa).
-# Cloudflare Workers Crons format 5-field Unix-like (menit, jam, DOM, bulan, DOW).
-# Hari 0=Minggu, 1=Senin, ..., 6=Sabtu. (Dokumentasi: https://developers.cloudflare.com/workers/configuration/cron-triggers/)
-#   "0 0 * * 0" = menit 0, jam 0, *, *, DOW 0 (Minggu)
-# NOTE: wrangler 4.128 kadang reject format ini. Worker akan auto-renew via
-# renewSubscription() yang dipanggil dari scheduled handler setiap minggu.
+# Cron scheduled di Worker dimatikan, biar semua renewal + poll
+# ditangani GitHub Actions (renew-websub.yml tiap minggu + clip.yml poll tiap jam).
+# Worker tetap handle WebSub push notifikasi (video_published) via HTTP handler.
 [triggers]
-crons = ["0 0 * * 0"]
+crons = []
 
 # Semua secret diisi via: wrangler secret put NAMA
 # (jangan commit ke repo)
