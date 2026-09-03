@@ -886,7 +886,15 @@ def upload_video(path, title, description):
             except Exception: pass
             log(f"[upload] attempt {attempt+1} gagal HTTP {e.response.status_code if e.response else '?'} body={body}")
             if e.response and e.response.status_code == 400:
-                # 400 sering transient (rate/processing) -> retry dgn jeda
+                # Detect permanent (non-transient) 400 errors -- jangan retry,
+                # langsung raise biar caller skip (caller detect 'uploadLimitExceeded'
+                # di body & simpan artifact untuk di-upload manual besok).
+                # Transient 400 (rate/processing) tetap di-retry dengan jeda.
+                if any(s in body for s in ("uploadLimitExceeded", "quotaExceeded",
+                                            "dailyLimitExceeded", "rateLimitExceeded")):
+                    log(f"[upload] quota/limit error detected -- skip retry, raise untuk caller")
+                    raise
+                # 400 lain (transient) -> retry dgn jeda
                 time.sleep(20 * (attempt + 1)); continue
             raise
     raise last_err or RuntimeError("upload gagal")
@@ -1216,10 +1224,15 @@ def main():
         except requests.HTTPError as e:
             code = e.response.status_code if e.response else 0
             body = ""
-            try: body = e.response.text[:200] if e.response else ""
+            # Slice HARUS cukup panjang untuk nangkap 'uploadLimitExceeded' di body
+            # YouTube. Reason string ada di akhir JSON (~chars 200-300). Slice 400
+            # (sama dengan yang dipakai di upload_video) supaya detection reliable.
+            try: body = e.response.text[:400] if e.response else ""
             except Exception: pass
             _log_trace(e, f"[seg{i}-upload] ")
-            if "uploadLimitExceeded" in body or code in (400, 429):
+            if any(s in body for s in ("uploadLimitExceeded", "quotaExceeded",
+                                        "dailyLimitExceeded", "rateLimitExceeded")) \
+                    or code in (400, 429):
                 log(f"[seg{i}] PHASE 5: SKIP (limit/quota) — artifact clip tetap di WORKDIR")
                 upload_errors += 1
             else:
