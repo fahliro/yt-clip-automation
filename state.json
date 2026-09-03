@@ -1,37 +1,6 @@
 {
   "done": [],
-  "uploaded": {
-    "pekTKSmz56A": {
-      "raw": "oPebITjEjGs",
-      "title": "Kampungnya tenggelam \ud83d\ude2d Cerita Muhammad Hussein yang bikin kita semua ikut sedih \ud83d\ude22",
-      "thumb": "/tmp/yt_clip/thumb_clip_00.jpg",
-      "ts": "2026-09-03T18:10:12.538848"
-    },
-    "ml2KPRZUtSA": {
-      "raw": "oPebITjEjGs",
-      "title": "Desa misterius muncul lagi dari dasar bendungan! \ud83d\ude31\ud83c\udf0a #shorts",
-      "thumb": "/tmp/yt_clip/thumb_clip_01.jpg",
-      "ts": "2026-09-03T18:12:24.862120"
-    },
-    "f-XgkPBWuuM": {
-      "raw": "oPebITjEjGs",
-      "title": "Momen Sedih Warga Melihat Kampung Lama Mereka \ud83d\ude22\ud83d\udc94",
-      "thumb": "/tmp/yt_clip/thumb_clip_02.jpg",
-      "ts": "2026-09-03T18:13:46.111459"
-    },
-    "pwSc0Jhov6k": {
-      "raw": "oPebITjEjGs",
-      "title": "Di Balik Pembangunan Megah, Ribuan Warga Harus Relokasi \ud83d\ude22\ud83c\udfd7\ufe0f",
-      "thumb": "/tmp/yt_clip/thumb_clip_03.jpg",
-      "ts": "2026-09-03T18:15:00.139385"
-    }
-  },
-  "failed": [
-    {
-      "id": "oPebITjEjGs",
-      "reason": "all_segments_upload_skipped",
-      "ts": "2026-09-03T18:35:57.097104"
-    }
-  ],
+  "uploaded": {},
+  "failed": [],
   "processing": {}
 }
