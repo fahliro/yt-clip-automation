@@ -986,15 +986,25 @@ def upload_video(path, title, description):
             return vid
         except requests.HTTPError as e:
             last_err = e
+            # Build body safely. HTTPError's .response can be None for some
+            # network errors; fall back to str(e) which usually contains the
+            # API JSON when requests.post did receive a response.
+            code = 0
             body = ""
-            try: body = e.response.text[:400]
-            except Exception: pass
-            log(f"[upload] attempt {attempt+1} gagal HTTP {e.response.status_code if e.response else '?'} body={body}")
-            if e.response and e.response.status_code == 400:
-                # Detect permanent (non-transient) 400 errors -- jangan retry,
-                # langsung raise biar caller skip (caller detect 'uploadLimitExceeded'
-                # di body & simpan artifact untuk di-upload manual besok).
-                # Transient 400 (rate/processing) tetap di-retry dengan jeda.
+            try:
+                if e.response is not None:
+                    code = e.response.status_code
+                    body = (e.response.text or "")[:400]
+                else:
+                    body = str(e)[:400]
+            except Exception:
+                pass
+            log(f"[upload] attempt {attempt+1} gagal HTTP {code if code else '?'} body={body}")
+            # Detect permanent (non-transient) 400 errors -- jangan retry,
+            # langsung raise biar caller skip (caller detect 'uploadLimitExceeded'
+            # di body & simpan artifact untuk di-upload manual besok).
+            # Transient 400 (rate/processing) tetap di-retry dengan jeda.
+            if code == 400:
                 if any(s in body for s in ("uploadLimitExceeded", "quotaExceeded",
                                             "dailyLimitExceeded", "rateLimitExceeded")):
                     log(f"[upload] quota/limit error detected -- skip retry, raise untuk caller")
@@ -1436,22 +1446,38 @@ def _run_pipeline_impl(video_id):
             except Exception as e:
                 _log_trace(e, f"[seg{i}-save-uploaded] ")
         except requests.HTTPError as e:
-            code = e.response.status_code if e.response else 0
+            # Build body safely. HTTPError's .response can be None for some
+            # network errors; fall back to empty string and check error str
+            # representation (which usually contains the API JSON).
+            code = 0
             body = ""
-            # Slice HARUS cukup panjang untuk nangkap 'uploadLimitExceeded' di body
-            # YouTube. Reason string ada di akhir JSON (~chars 200-300). Slice 400
-            # (sama dengan yang dipakai di upload_video) supaya detection reliable.
-            try: body = e.response.text[:400] if e.response else ""
-            except Exception: pass
+            try:
+                if e.response is not None:
+                    code = e.response.status_code
+                    body = (e.response.text or "")[:400]
+                else:
+                    body = str(e)[:400]
+            except Exception:
+                pass
             _log_trace(e, f"[seg{i}-upload] ")
-            if any(s in body for s in ("uploadLimitExceeded", "quotaExceeded",
-                                        "dailyLimitExceeded", "rateLimitExceeded")) \
-                    or code in (400, 429):
+            # Upload quota/limit detection. Use BOTH body AND exception message
+            # (since body might be empty if response is None) + HTTP status codes.
+            is_quota_error = (
+                any(s in body for s in ("uploadLimitExceeded", "quotaExceeded",
+                                        "dailyLimitExceeded", "rateLimitExceeded"))
+                or any(s in str(e) for s in ("uploadLimitExceeded", "quotaExceeded",
+                                              "dailyLimitExceeded", "rateLimitExceeded"))
+                or code in (400, 429)
+            )
+            if is_quota_error:
                 log(f"[seg{i}] PHASE 5: SKIP (limit/quota) — artifact clip tetap di WORKDIR")
                 upload_errors += 1
             else:
                 raise  # error lain -> stop pipeline
         except Exception as e:
+            # Non-HTTP errors: treat as soft-fail (network blip, file IO, dll).
+            # Pipeline continue ke PHASE 6 (cross-post Meta) so limit-upload
+            # gak menghentikan proses user.
             _log_trace(e, f"[seg{i}-upload] ")
             log(f"[seg{i}] PHASE 5: error (non-HTTP) — artifact clip tetap di WORKDIR")
             upload_errors += 1
