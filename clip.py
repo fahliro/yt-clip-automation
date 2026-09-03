@@ -211,6 +211,13 @@ def pick_segments(transcript, lang="unknown"):
                  "reason": "fallback", "fillers": DEFAULT_FILLERS}
                 for i in range(0, int(words[-1]["end"]), 45)]
     for s in segs:
+        if not isinstance(s, dict):
+            # LLM bisa return list of strings (malformed). Skip non-dict,
+            # atau convert minimal ke dict format.
+            if isinstance(s, str):
+                log(f"[llm] pick_segments: skip string entry (bukan dict)")
+                continue
+            continue
         s.setdefault("fillers", DEFAULT_FILLERS)
     segs.sort(key=lambda s: s.get("score", 0), reverse=True)
     log(f"LLM pilih {len(segs)} segmen")
@@ -1203,16 +1210,55 @@ def upload_to_instagram_reels(clip_path, title, description):
     tok = _meta_get_long_token()
     ig_user_id = os.environ.get("META_IG_USER_ID", "").strip()
     fb_vid = os.environ.get("META_LAST_FB_VIDEO_ID", "").strip()  # di-set sebelumnya
+    page_id = os.environ.get("META_FB_PAGE_ID", "").strip()
     if not tok or not ig_user_id or not fb_vid:
         log("[meta-ig] skip: token/ig_user_id/fb_video_id kosong"); return None
+
+    # --- NEW: resolve FB video ke direct CDN URL ---
+    # IG Graph API *mesti* dapat direct video URL (HTTPS, public, .mp4).
+    # URL page view (facebook.com/{id}/videos/{vid}) = HTML page -> IG fetch
+    # error "Media download has failed". Fix: ambil `source` field dari Graph API
+    # /{video-id}?fields=videos{source} -> URL CDN langsung ke file .mp4.
+    video_url = None
+    try:
+        log(f"[meta-ig] resolving direct URL for fb_video={fb_vid}...")
+        rv = requests.get(
+            f"https://graph.facebook.com/v22.0/{fb_vid}",
+            params={"fields": "videos{source,length}", "access_token": tok},
+            timeout=30,
+        )
+        if rv.ok:
+            j = rv.json()
+            # struktur: {"videos":{"data":[{"source":"https://...","length":N}]}}
+            src_list = j.get("videos", {}).get("data", [])
+            if src_list:
+                src = src_list[0].get("source", "")
+                if src and "http" in src.lower():
+                    video_url = src
+                    log(f"[meta-ig] resolved direct URL (len={src_list[0].get('length')}s): {src[:80]}...")
+                else:
+                    log(f"[meta-ig] resolve: source field kosong/tidak valid")
+            else:
+                log(f"[meta-ig] resolve: tidak ada videos.data — respon={rv.text[:300]}")
+        else:
+            log(f"[meta-ig] resolve gagal HTTP {rv.status_code}: {rv.text[:200]}")
+    except Exception as e:
+        log(f"[meta-ig] resolve error: {e}")
+
+    # Fallback ke page-view URL (biasanya gagal di IG, tapi tetap coba)
+    if not video_url:
+        video_url = f"https://facebook.com/{page_id}/videos/{fb_vid}"
+        log(f"[meta-ig] fallback ke page-view URL: {video_url}")
+
     # Step 1: container
     try:
         hashtag = os.environ.get("META_IG_HASHTAG", "#shorts #reels")
         caption = (description or title) + "\n\n" + hashtag
+        log(f"[meta-ig] creating container with video_url={video_url[:80]}...")
         r = requests.post(
             f"https://graph.facebook.com/v22.0/{ig_user_id}/media",
             params={"access_token": tok, "media_type": "REELS",
-                    "video_url": f"https://facebook.com/{os.environ['META_FB_PAGE_ID']}/videos/{fb_vid}",
+                    "video_url": video_url,
                     "caption": caption[:2200], "share_to_feed": "true"},
             timeout=120,
         )
