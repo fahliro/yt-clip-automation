@@ -3,7 +3,6 @@ yt_dlp_oauth.json
 *.oauth.json
 yt_cookies.txt
 cookies.txt
-state.json
 __pycache__/
 *.ass
 part_*.mp4
