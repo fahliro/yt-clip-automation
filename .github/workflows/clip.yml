@@ -5,8 +5,8 @@ on:
     types: [video_published]
   # Fallback: poll channel tiap 1 jam (jaga-jaga WebSub mati).
   # Perlu YT_READ_TOKEN (scope youtube.readonly) -> lihat clip.py poll().
-  # schedule:
-    # - cron: "0 * * * *"
+  schedule:
+    - cron: "0 * * * *"
   workflow_dispatch:
     inputs:
       video_id:
