@@ -1198,103 +1198,93 @@ def upload_to_facebook_reels(clip_path, title, description):
 
 
 def upload_to_instagram_reels(clip_path, title, description):
-    """Upload Reels ke Instagram Business via Graph API 2-step container pattern.
+    """Upload Reels ke Instagram Business via Graph API menggunakan Resumable Upload (Direct Binary Upload).
     Returns: media_id (IG) atau None kalau gagal/skip.
-    Flow:
-      1. POST /{ig-user-id}/media (video_url, caption, media_type=REELS)
-      2. POST /{ig-user-id}/media_publish (creation_id)
-    Note: media harus sudah di-host di URL publik (IG tidak terima upload multipart).
-    Workaround: pakai staged upload via Facebook dulu (DONE), lalu set IG
-    source_url ke URL FB (Graph API support ini, since v18+).
     """
     tok = _meta_get_long_token()
     ig_user_id = os.environ.get("META_IG_USER_ID", "").strip()
-    fb_vid = os.environ.get("META_LAST_FB_VIDEO_ID", "").strip()  # di-set sebelumnya
-    page_id = os.environ.get("META_FB_PAGE_ID", "").strip()
-    if not tok or not ig_user_id or not fb_vid:
-        log("[meta-ig] skip: token/ig_user_id/fb_video_id kosong"); return None
+    if not tok or not ig_user_id:
+        log("[meta-ig] skip: token atau ig_user_id kosong")
+        return None
 
-    # --- NEW: resolve FB video ke direct CDN URL ---
-    # IG Graph API *mesti* dapat direct video URL (HTTPS, public, .mp4).
-    # URL page view (facebook.com/{id}/videos/{vid}) = HTML page -> IG fetch
-    # error "Media download has failed". Fix: ambil `source` field dari Graph API
-    # /{video-id}?fields=source -> URL CDN langsung ke file .mp4.
-    # NOTE: field `videos` di Video object tidak ada — pakai `source` langsung.
-    video_url = None
+    file_path = pathlib.Path(clip_path)
+    file_size = file_path.stat().st_size
+    hashtag = os.environ.get("META_IG_HASHTAG", "#shorts #reels")
+    caption = (description or title) + "\n\n" + hashtag
+
     try:
-        log(f"[meta-ig] resolving direct URL for fb_video={fb_vid}...")
-        rv = requests.get(
-            f"https://graph.facebook.com/v22.0/{fb_vid}",
-            params={"fields": "source,length,format", "access_token": tok},
-            timeout=30,
-        )
-        if rv.ok:
-            j = rv.json()
-            src = j.get("source", "")
-            if src and "http" in src.lower():
-                video_url = src
-                log(f"[meta-ig] resolved direct URL (len={j.get('length')}s, format={j.get('format')}): {src[:80]}...")
-            else:
-                log(f"[meta-ig] resolve: source field kosong/tidak valid: {rv.text[:200]}")
-        else:
-            log(f"[meta-ig] resolve gagal HTTP {rv.status_code}: {rv.text[:200]}")
-    except Exception as e:
-        log(f"[meta-ig] resolve error: {e}")
-
-    # Fallback ke page-view URL (biasanya gagal di IG, tapi tetap coba)
-    if not video_url:
-        video_url = f"https://facebook.com/{page_id}/videos/{fb_vid}"
-        log(f"[meta-ig] fallback ke page-view URL: {video_url}")
-
-    # Step 1: container
-    try:
-        hashtag = os.environ.get("META_IG_HASHTAG", "#shorts #reels")
-        caption = (description or title) + "\n\n" + hashtag
-        log(f"[meta-ig] creating container with video_url={video_url[:80]}...")
-        r = requests.post(
+        # Step 1: Inisialisasi Resumable Upload Session
+        log("[meta-ig] Step 1: Inisialisasi Resumable Upload Session...")
+        r1 = requests.post(
             f"https://graph.facebook.com/v22.0/{ig_user_id}/media",
-            params={"access_token": tok, "media_type": "REELS",
-                    "video_url": video_url,
-                    "caption": caption[:2200], "share_to_feed": "true"},
-            timeout=120,
+            params={
+                "access_token": tok,
+                "media_type": "REELS",
+                "upload_type": "resumable",
+                "caption": caption[:2200]
+            },
+            timeout=30
         )
-        if not r.ok:
-            log(f"[meta-ig] container gagal: HTTP {r.status_code} body={r.text[:300]}")
+        if not r1.ok:
+            log(f"[meta-ig] Init session gagal: {r1.text[:200]}")
             return None
-        creation_id = r.json().get("id")
-        if not creation_id:
-            log(f"[meta-ig] no creation_id: {r.text[:200]}"); return None
-        log(f"[meta-ig] container created: {creation_id}")
-        # Step 2: publish with retry-with-backoff.
-        # IG butuh waktu ~30-60s untuk process video container sebelum bisa
-        # di-publish. Kalau langsung publish setelah create, dapat error
-        # "Media ID is not available" (code 9007). Retry up to 3x dgn jeda 30s.
-        import time as _time
-        for pub_attempt in range(3):
+
+        res1 = r1.json()
+        container_id = res1.get("id")
+        upload_uri = res1.get("uri")
+
+        # Step 2: Transfer Biner File Video ke Server Meta
+        log(f"[meta-ig] Step 2: Uploading binary bytes ({file_size} bytes)...")
+        with open(file_path, "rb") as f:
             r2 = requests.post(
-                f"https://graph.facebook.com/v22.0/{ig_user_id}/media_publish",
-                params={"access_token": tok, "creation_id": creation_id},
-                timeout=120,
+                upload_uri,
+                headers={
+                    "Authorization": f"OAuth {tok}",
+                    "file_offset": "0",
+                    "Content-Type": "application/octet-stream"
+                },
+                data=f,
+                timeout=300
             )
-            if r2.ok:
-                mid = r2.json().get("id")
-                log(f"[meta-ig] published: {mid} (attempt {pub_attempt+1}/3)")
-                return mid
-            log(f"[meta-ig] publish attempt {pub_attempt+1}/3 gagal: HTTP {r2.status_code} body={r2.text[:200]}")
-            # Cek transient error: 9007/2207027 (media not ready) atau 2 (transient)
-            transient = (r2.status_code == 400 and (
-                "Media ID is not available" in r2.text
-                or '"code":9007' in r2.text
-                or '"code":2' in r2.text
-            )) or r2.status_code in (429, 500, 502, 503, 504)
-            if not transient or pub_attempt == 2:
-                log(f"[meta-ig] publish gagal final: HTTP {r2.status_code} body={r2.text[:300]}")
-                return None
-            # Wait 30s sebelum retry (IG video processing time)
-            log(f"[meta-ig] wait 30s untuk IG process video...")
-            _time.sleep(30)
+        if not r2.ok:
+            log(f"[meta-ig] Binary upload gagal: {r2.text[:200]}")
+            return None
+
+        # Step 3: Polling Status Video sampai FINISHED
+        log(f"[meta-ig] Step 3: Checking container processing status ({container_id})...")
+        import time
+        for _ in range(12):  # Cek hingga max 12x (Total ~120 detik)
+            time.sleep(10)
+            r_status = requests.get(
+                f"https://graph.facebook.com/v22.0/{container_id}",
+                params={"fields": "status_code", "access_token": tok},
+                timeout=30
+            )
+            if r_status.ok:
+                status = r_status.json().get("status_code")
+                log(f"[meta-ig] Status processing: {status}")
+                if status == "FINISHED":
+                    break
+                elif status == "ERROR":
+                    log("[meta-ig] Processing video error di server Instagram.")
+                    return None
+
+        # Step 4: Publish Container ke IG Feed/Reels
+        log(f"[meta-ig] Step 4: Publishing container...")
+        r_pub = requests.post(
+            f"https://graph.facebook.com/v22.0/{ig_user_id}/media_publish",
+            params={"access_token": tok, "creation_id": container_id},
+            timeout=60
+        )
+        if r_pub.ok:
+            media_id = r_pub.json().get("id")
+            log(f"[meta-ig] SUCCESS! Published media_id: {media_id}")
+            return media_id
+        else:
+            log(f"[meta-ig] Publish gagal: {r_pub.text[:200]}")
+
     except Exception as e:
-        log(f"[meta-ig] error: {e}")
+        log(f"[meta-ig] Error: {e}")
     return None
 
 
