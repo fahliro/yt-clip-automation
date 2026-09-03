@@ -868,10 +868,29 @@ def upload_video(path, title, description):
 
 # ---------------------------------------------------------------- STATE
 def already_done(video_id):
+    """Skip kalau video_id sudah pernah diproses (raw ATAU short).
+
+    Penting: cek juga uploaded{} keys (short IDs) biar upload Shorts ke channel
+    sendiri tidak men-trigger re-clip dirinya sendiri via WebSub.
+    Tanpa ini, setiap Short yang baru di-publish akan dispatch workflow sekali
+    lagi untuk clip dirinya sendiri (download + Whisper + LLM + upload).
+    """
     sf = pathlib.Path(os.environ.get("STATE_FILE", "state.json"))
     if not sf.exists():
         return False
-    return video_id in set(json.loads(sf.read_text()).get("done", []))
+    try:
+        data = json.loads(sf.read_text())
+    except (json.JSONDecodeError, OSError):
+        # State korup / gak bisa dibaca -> anggap belum diproses (False).
+        # Aman: clip akan jalan, lalu state ditimpa oleh mark_done().
+        return False
+    # Block raw IDs yang sudah diproses
+    if video_id in set(data.get("done", [])):
+        return True
+    # Block juga short IDs yang sudah di-upload (mapping raw -> short di uploaded{})
+    if video_id in data.get("uploaded", {}):
+        return True
+    return False
 
 
 def mark_done(video_id):
