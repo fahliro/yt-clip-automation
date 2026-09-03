@@ -1235,14 +1235,20 @@ def upload_to_instagram_reels(clip_path, title, description):
 
         # Step 2: Transfer Biner File Video ke Server Meta
         log(f"[meta-ig] Step 2: Uploading binary bytes ({file_size} bytes)...")
+        
+        headers = {
+            "Authorization": f"OAuth {tok}",
+            "Offset": "0",                         # Pakai 'Offset' (String)
+            "file_offset": "0",                    # Tetap sediakan 'file_offset' sebagai String
+            "X-Entity-Length": str(file_size),     # Ukuran total file dalam String
+            "X-Entity-Name": file_path.name,       # Nama file
+            "Content-Type": "application/octet-stream"
+        }
+
         with open(file_path, "rb") as f:
             r2 = requests.post(
                 upload_uri,
-                headers={
-                    "Authorization": f"OAuth {tok}",
-                    "file_offset": "0",
-                    "Content-Type": "application/octet-stream"
-                },
+                headers=headers,
                 data=f,
                 timeout=300
             )
