@@ -1223,32 +1223,103 @@ def upload_to_instagram_reels(clip_path, title, description):
         if not creation_id:
             log(f"[meta-ig] no creation_id: {r.text[:200]}"); return None
         log(f"[meta-ig] container created: {creation_id}")
-        # Step 2: publish
-        r2 = requests.post(
-            f"https://graph.facebook.com/v22.0/{ig_user_id}/media_publish",
-            params={"access_token": tok, "creation_id": creation_id},
-            timeout=120,
-        )
-        if r2.ok:
-            mid = r2.json().get("id")
-            log(f"[meta-ig] published: {mid}")
-            return mid
-        log(f"[meta-ig] publish gagal: HTTP {r2.status_code} body={r2.text[:300]}")
+        # Step 2: publish with retry-with-backoff.
+        # IG butuh waktu ~30-60s untuk process video container sebelum bisa
+        # di-publish. Kalau langsung publish setelah create, dapat error
+        # "Media ID is not available" (code 9007). Retry up to 3x dgn jeda 30s.
+        import time as _time
+        for pub_attempt in range(3):
+            r2 = requests.post(
+                f"https://graph.facebook.com/v22.0/{ig_user_id}/media_publish",
+                params={"access_token": tok, "creation_id": creation_id},
+                timeout=120,
+            )
+            if r2.ok:
+                mid = r2.json().get("id")
+                log(f"[meta-ig] published: {mid} (attempt {pub_attempt+1}/3)")
+                return mid
+            log(f"[meta-ig] publish attempt {pub_attempt+1}/3 gagal: HTTP {r2.status_code} body={r2.text[:200]}")
+            # Cek transient error: 9007/2207027 (media not ready) atau 2 (transient)
+            transient = (r2.status_code == 400 and (
+                "Media ID is not available" in r2.text
+                or '"code":9007' in r2.text
+                or '"code":2' in r2.text
+            )) or r2.status_code in (429, 500, 502, 503, 504)
+            if not transient or pub_attempt == 2:
+                log(f"[meta-ig] publish gagal final: HTTP {r2.status_code} body={r2.text[:300]}")
+                return None
+            # Wait 30s sebelum retry (IG video processing time)
+            log(f"[meta-ig] wait 30s untuk IG process video...")
+            _time.sleep(30)
     except Exception as e:
         log(f"[meta-ig] error: {e}")
     return None
 
 
-def cross_post_meta(clip_path, title, description):
+def _fb_set_thumbnail(fb_video_id, thumb_path):
+    """Upload custom thumbnail to FB Reels via video_thumbnails endpoint.
+    Returns True on success, False on failure (HTTP 4xx/5xx). Soft-fail only —
+    if the account doesn't have permission, the video stays with default
+    auto-generated thumbnails. Caller logs the failure."""
+    tok = _meta_get_long_token()
+    if not tok or not fb_video_id or not thumb_path:
+        return False
+    try:
+        with open(thumb_path, "rb") as f:
+            r = requests.post(
+                f"https://graph.facebook.com/v22.0/{fb_video_id}/thumbnails",
+                params={"access_token": tok},
+                files={"source": (pathlib.Path(thumb_path).name, f, "image/jpeg")},
+                timeout=60,
+            )
+        if r.ok:
+            log(f"[meta-fb-thumb] uploaded for fb_video={fb_video_id}")
+            return True
+        log(f"[meta-fb-thumb] gagal: HTTP {r.status_code} body={r.text[:200]}")
+    except Exception as e:
+        log(f"[meta-fb-thumb] error: {e}")
+    return False
+
+
+def _ig_set_thumbnail(ig_media_id, thumb_path):
+    """Set custom thumbnail to IG Reels via media update.
+    Note: IG doesn't have a direct "set thumbnail" endpoint for Reels —
+    thumbnail is auto-extracted from first frame. Best workaround: re-create
+    container with is_video_thumbnail_from_video=false and provide
+    thumbnail_url in the next publish call (only works for IG TV, not Reels).
+
+    Returns True on success, False on failure. Currently Reels can't override
+    thumbnail — we log + return False (silent no-op)."""
+    # IG Reels doesn't support custom thumbnail via API as of v22.0.
+    # Auto-extract from first frame of uploaded video. Skip silently.
+    return False
+
+
+def cross_post_meta(clip_path, title, description, thumb_path=None):
     """Orchestrator: upload ke FB Reels dulu, kalau sukses upload ke IG Reels
-    (pakai FB video_id sebagai source untuk IG container)."""
+    (pakai FB video_id sebagai source untuk IG container).
+
+    Args:
+        clip_path: path ke video clip yg akan di-upload
+        title: judul Reels
+        description: caption Reels
+        thumb_path: optional path ke custom thumbnail JPG (1080x1920).
+                    Kalau ada, di-upload ke FB Reels sebagai custom thumbnail.
+    Returns: {"fb": vid, "ig": mid, "fb_thumb_ok": bool} atau None kalau FB gagal.
+    """
     fb_vid = upload_to_facebook_reels(clip_path, title, description)
     if not fb_vid:
         return None
+    # Set custom thumbnail ke FB Reels (best-effort, soft-fail kalau akun belum verified)
+    fb_thumb_ok = False
+    if thumb_path and pathlib.Path(thumb_path).exists():
+        fb_thumb_ok = _fb_set_thumbnail(fb_vid, thumb_path)
+        if not fb_thumb_ok:
+            log(f"[cross-post] FB thumb skip (akun mungkin belum verified) - video tetap ter-upload dengan default thumb")
     # Set env var sementara biar upload_to_instagram_reels bisa baca
     os.environ["META_LAST_FB_VIDEO_ID"] = fb_vid
     ig_vid = upload_to_instagram_reels(clip_path, title, description)
-    return {"fb": fb_vid, "ig": ig_vid}
+    return {"fb": fb_vid, "ig": ig_vid, "fb_thumb_ok": fb_thumb_ok}
 
 
 # ---------------------------------------------------------------- POLL (cron fallback)
@@ -1498,11 +1569,14 @@ def _run_pipeline_impl(video_id):
                 _log_trace(e, f"[seg{i}-thumb-set] ")
                 log(f"[seg{i}] PHASE 5b: SKIP thumbnail (lanjut upload tanpa custom thumb)")
 
-        # PHASE 6: Cross-post Meta
+        # PHASE 6: Cross-post Meta (FB Reels + IG Reels)
         log(f"[seg{i}] PHASE 6/6: CROSS-POST Meta (FB Reels + IG Reels)")
         try:
-            cross_post_meta(clip, title, desc)
-            log(f"[seg{i}] PHASE 6: OK cross-post")
+            result = cross_post_meta(clip, title, desc, thumb_path=str(thumb) if thumb and pathlib.Path(thumb).exists() else None)
+            if result:
+                log(f"[seg{i}] PHASE 6: OK cross-post fb={result.get('fb')} ig={result.get('ig')} fb_thumb_ok={result.get('fb_thumb_ok')}")
+            else:
+                log(f"[seg{i}] PHASE 6: skip (FB upload gagal, tidak coba IG)")
         except Exception as e:
             _log_trace(e, f"[seg{i}-meta-cross] ")
             log(f"[seg{i}] PHASE 6: skip (lanjut)")
