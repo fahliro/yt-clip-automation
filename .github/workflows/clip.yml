@@ -27,7 +27,10 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install -U pip
-          pip install -r requirements.txt
+          # playwright postinstall auto-downloads chromium via fetch — bisa crash
+          # di runner (TypeError: fetch failed). Disable auto-download; kita
+          # download binary terpisah di bawah dengan error-handling eksplisit.
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 pip install -r requirements.txt
           node --version
           # Install Noto Color Emoji font (untuk emoticon berwarna di thumbnail).
           # apt-get butuh sudo di runner Ubuntu — install via fontconfig download.
@@ -38,6 +41,8 @@ jobs:
           fc-cache -f || true
           # Install Playwright Chromium untuk HTML+CSS thumbnail renderer.
           # Tambah ~120MB ke runner, tapi reliable untuk Twemoji SVG + Google Fonts.
+          # PENTING: jangan pakai --with-deps karena apt-get crash di GitHub runner (TypeError: fetch failed).
+          # Download binary aja — system deps (libnss3, libatk1.0, dll) sudah ada di ubuntu-latest runner.
           python -m playwright install chromium 2>&1 | tail -5 || \
             echo "WARN: gagal install Chromium, thumbnail fallback ke PIL"
 
@@ -81,6 +86,10 @@ jobs:
           LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
           STATE_FILE: ${{ github.workspace }}/state.json
+          # Cross-post Meta (FB Reels + IG Reels)
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          META_FB_PAGE_ID: ${{ secrets.META_FB_PAGE_ID }}
+          META_IG_USER_ID: ${{ secrets.META_IG_USER_ID }}
         run: python clip.py
 
       - name: Save state (anti double-clip)

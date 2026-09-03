@@ -15,7 +15,7 @@ import pathlib
 import re as _re
 import requests
 import os
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 EMOJI_PATTERN = _re.compile(
     r'([\U0001F300-\U0001FAFF\U00002600-\U000027BF\u200D\uFE0F])'
@@ -198,25 +198,101 @@ def build_thumbnail_html(
 def render_html_to_image(html, width=1080, height=1920, out_path=None):
     """Render HTML via Playwright Chromium. Return PIL Image.
     Playwright sync, headless. Slow (~2-5s) but precise CSS.
+
+    Falls back ke pure-PIL renderer kalau Chromium binary belum terinstall
+    (mis. CI runner tanpa playwright install-deps). Slower ~50ms tapi gak crash.
     """
-    from playwright.sync_api import sync_playwright
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(viewport={"width": width, "height": height},
-                                       device_scale_factor=1)
-        page = context.new_page()
-        page.set_content(html, wait_until="networkidle", timeout=15000)
-        # Wait for Google Fonts to load
-        page.evaluate("document.fonts.ready")
-        page.wait_for_timeout(500)
-        # Screenshot
-        png_bytes = page.screenshot(type="png", full_page=False, omit_background=False)
-        browser.close()
-    import io as _io
-    img = Image.open(_io.BytesIO(png_bytes)).convert("RGB")
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(viewport={"width": width, "height": height},
+                                           device_scale_factor=1)
+            page = context.new_page()
+            page.set_content(html, wait_until="networkidle", timeout=15000)
+            # Wait for Google Fonts to load
+            page.evaluate("document.fonts.ready")
+            page.wait_for_timeout(500)
+            # Screenshot
+            png_bytes = page.screenshot(type="png", full_page=False, omit_background=False)
+            browser.close()
+        import io as _io
+        img = Image.open(_io.BytesIO(png_bytes)).convert("RGB")
+    except Exception as e:
+        # Playwright unavailable (no chromium binary, network blocked, etc).
+        # Fallback: parse the HTML minimally and render via PIL only.
+        import logging
+        logging.warning(f"[thumbnail] playwright fail ({e.__class__.__name__}: {str(e)[:100]}), using PIL fallback")
+        img = _render_pil_fallback(html, width, height)
     if out_path:
         img.save(out_path, "JPEG", quality=92)
     return img
+
+
+def _render_pil_fallback(html, width=1080, height=1920):
+    """PIL-only fallback: extract background from <img class="bg"> data URL,
+    overlay text from .hook (plain text only, no emoji rendering).
+
+    Quality rendah vs Chromium, tapi pipeline tetap jalan. Cuma dipakai
+    kalau playwright unavailable (cold-start CI, network block, dll).
+    """
+    from io import BytesIO
+    # Extract background image
+    bg_match = _re.search(r'<img class="bg" src="data:image/[^;]+;base64,([^"]+)"', html)
+    if bg_match:
+        bg_data = base64.b64decode(bg_match.group(1))
+        bg = Image.open(BytesIO(bg_data)).convert("RGB")
+        img = bg.resize((width, height), Image.LANCZOS)
+    else:
+        img = Image.new("RGB", (width, height), "#000000")
+    # Add dark gradient overlay
+    overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    for y in range(int(height * 0.4), height):
+        alpha = int(160 * (y - height * 0.4) / (height * 0.6))
+        for x in range(width):
+            overlay.putpixel((x, y), (0, 0, 0, alpha))
+    img = img.convert("RGBA")
+    img = Image.alpha_composite(img, overlay)
+    # Extract hook text (strip HTML)
+    hook_match = _re.search(r'<h1 class="hook">(.*?)</h1>', html, _re.DOTALL)
+    if hook_match:
+        # Strip tags, keep text + emoji
+        text = _re.sub(r'<[^>]+>', '', hook_match.group(1))
+        text = text.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+        # Try to find a default font
+        try:
+            from PIL import ImageFont
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 120)
+        except Exception:
+            from PIL import ImageFont
+            font = ImageFont.load_default()
+        # Wrap text
+        draw = ImageDraw.Draw(img)
+        words = text.split()
+        lines, cur = [], ""
+        for w in words:
+            test = (cur + " " + w).strip()
+            bbox = draw.textbbox((0, 0), test, font=font)
+            if bbox[2] - bbox[0] > int(width * 0.85):
+                lines.append(cur)
+                cur = w
+            else:
+                cur = test
+        if cur:
+            lines.append(cur)
+        # Draw lines centered vertically
+        y_start = (height - len(lines) * 130) // 2
+        for i, line in enumerate(lines):
+            bbox = draw.textbbox((0, 0), line, font=font)
+            tw = bbox[2] - bbox[0]
+            x = (width - tw) // 2
+            y = y_start + i * 130
+            # Stroke (black outline)
+            for dx, dy in [(-4, -4), (-4, 4), (4, -4), (4, 4), (0, -4), (0, 4), (-4, 0), (4, 0)]:
+                draw.text((x + dx, y + dy), line, font=font, fill="black")
+            # Text fill (yellow from CSS default)
+            draw.text((x, y), line, font=font, fill="#FFE600")
+    return img.convert("RGB")
 
 
 def gen_thumbnail_html(bg_image_path, hook_text, out_path, **style_kwargs):
