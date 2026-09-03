@@ -114,24 +114,15 @@ def transcribe(path):
             log(f"[groq] HTTP {r.status_code}: {r.text[:500]}")
             r.raise_for_status()
     data = r.json()
-    # Log eksplisit bahasa Whisper + sample text biar gampang analisa
-    # di CI log (cek apakah Whisper deteksi benar & transcript bukan auto-detect salah).
-    lang_full = data.get("language", "unknown")
-    _LANG_MAP = {
-        "id": "Indonesian", "en": "English", "ja": "Japanese", "ko": "Korean",
-        "zh": "Chinese", "es": "Spanish", "pt": "Portuguese", "fr": "French",
-        "de": "German", "ar": "Arabic", "ru": "Russian", "hi": "Hindi",
-        "th": "Thai", "vi": "Vietnamese", "ms": "Malay", "tl": "Filipino",
-    }
-    lang_label = _LANG_MAP.get(lang_full, lang_full)
-    # Ambil sample 200 char pertama dari transcript untuk diagnosa
+    # Log sample text untuk diagnosa. Groq Whisper TIDAK return `language` field
+    # yang reliable, jadi language detection dipindah ke LLM step terpisah
+    # (lihat detect_lang_llm). Transcript sudah dapat dari `data["text"]` atau
+    # `data["segments"][*]["text"]`.
     _full_text = data.get("text", "").strip()
     if not _full_text and data.get("segments"):
         _full_text = " ".join(s.get("text", "") for s in data["segments"]).strip()
     _sample = (_full_text[:200] + "...") if len(_full_text) > 200 else _full_text
-    log(f"[whisper] detected_lang={lang_full} ({lang_label}) "
-        f"confidence={data.get('language_probability', '?')} "
-        f"text_len={len(_full_text)} sample='{_sample}'")
+    log(f"[whisper] text_len={len(_full_text)} sample='{_sample}'")
     # Groq/OpenAI verbose_json: "words" bersarang di dalam "segments", BUKAN top-level.
     # Pipeline butuh list words flat (buat caption + LLM) -> flatten biar caption kebakar.
     if not data.get("words"):
@@ -147,7 +138,12 @@ def transcribe(path):
 
 
 # ---------------------------------------------------------------- 3. LLM PILIH
-def pick_segments(transcript):
+def pick_segments(transcript, lang="unknown"):
+    """Pick interesting segments from a transcript. `lang` is the language
+    name (e.g., "Indonesian", "English") -- passed from main() after
+    detect_lang_llm(). Used in prompt so the LLM reasons in the right
+    language context.
+    """
     import requests
     words = transcript.get("words", [])
     if not words:
@@ -167,14 +163,13 @@ def pick_segments(transcript):
         if w["end"] - t >= 5:
             chunks.append(f"[{t:.0f}s] " + " ".join(buf))
             t, buf = w["end"], []
-    # Prompt standar English (sesuai preferensi user). Placeholder bahasa
-    # diisi runtime dari hasil Whisper (parameter `transcript` di fungsi ini,
-    # BUKAN `data` -- itu scope di dalam transcribe()).
-    transcript_lang = transcript.get("language", "unknown")
+    # Prompt placeholder bahasa diisi runtime dari caller (lihat main():
+    # detect_lang_llm() → lang = "Indonesian"/"English"/etc). Bukan dari
+    # transcript.get("language") karena Groq Whisper gak return field itu.
     transcript_for_llm = (
         "You are a short-form video editor. From the following timestamped "
         "transcript, pick 3-8 interesting segments for YouTube Shorts.\n"
-        f"TRANSCRIPT LANGUAGE: {transcript_lang}. "
+        f"TRANSCRIPT LANGUAGE: {lang}. "
         "Detect segments based on the transcript language -- do not translate.\n"
         "DURATION: each segment MUST be 25-45 seconds. If a funny moment is <25s, "
         "merge it with before/after context until 25-45s. If >45s, pick the "
@@ -350,26 +345,95 @@ def concat_parts(parts, idx):
     return final
 
 
+# ---------------------------------------------------------------- 2b. LANG DETECT
+def detect_lang_llm(transcript):
+    """Detect the dominant language of a transcript using the LLM.
+
+    Groq Whisper does NOT return a `language` field reliably, so we use the
+    same LLM endpoint to classify. Output is the language name in English
+    (e.g., "Indonesian", "English", "Arabic", "Japanese") — passed directly
+    to downstream prompts without translation.
+
+    Args:
+        transcript: Whisper verbose_json dict (must have 'text' or 'segments').
+
+    Returns:
+        str: language name in English, e.g. "Indonesian". Returns "unknown"
+        if LLM fails or transcript is empty.
+    """
+    # Extract transcript text (use 'text' first, else concat segments)
+    text = transcript.get("text", "").strip()
+    if not text and transcript.get("segments"):
+        text = " ".join(s.get("text", "") for s in transcript["segments"]).strip()
+    if not text:
+        return "unknown"
+
+    # Truncate to ~1000 chars for cheap classification
+    sample = text[:1000]
+    prompt = (
+        f"What language is the following text written in?\n"
+        f"\n"
+        f"=== TEXT ===\n{sample}\n"
+        f"===\n"
+        f"\n"
+        f"Reply with ONLY the language name in English (e.g., 'Indonesian', "
+        f"'English', 'Japanese', 'Arabic'). No explanation, no punctuation, "
+        f"no markdown. Just the word."
+    )
+    try:
+        result = _llm_call_json_freeform(prompt)
+        if result:
+            # Clean: take first line, strip whitespace & punctuation
+            lang = result.strip().split("\n")[0].strip().strip(".,;:!?\"'`")
+            if lang:
+                log(f"[lang-detect] LLM -> '{lang}' (from text len={len(text)})")
+                return lang
+    except Exception as e:
+        log(f"[lang-detect] LLM error: {e}")
+    return "unknown"
+
+
+def _llm_call_json_freeform(prompt, max_retries=1):
+    """Call LLM and return raw string response (not JSON). For simple
+    classification where we just need the LLM's text answer."""
+    import requests
+    base = os.environ.get("LLM_BASE_URL", "").rstrip("/")
+    if not base or not os.environ.get("LLM_API_KEY"):
+        return None
+    last_err = None
+    for attempt in range(max_retries + 1):
+        try:
+            r = requests.post(
+                f"{base}/chat/completions",
+                headers={"Authorization": f"Bearer {os.environ['LLM_API_KEY']}",
+                         "Content-Type": "application/json"},
+                json={"model": os.environ["LLM_MODEL"], "messages": [
+                    {"role": "user", "content": prompt}]},
+                timeout=30,
+            )
+            if r.ok:
+                content = r.json()["choices"][0]["message"]["content"]
+                return content.strip()
+            last_err = f"HTTP {r.status_code}: {r.text[:200]}"
+        except Exception as e:
+            last_err = f"network: {e}"
+    log(f"[lang-detect] all attempts failed: {last_err}")
+    return None
+
+
 # ---------------------------------------------------------------- 4c. TITLE/DESC
 # Generate title + description engaging (POV viewers, pake emoticon,
 # bahasa sesuai video). Pake LLM yang sama dengan pick_segments.
 # Returns: (title, description) — title max 100 char, desc max 4900 char.
 import re as _re
-_LANG_NAME = {
-    "id": "Indonesian", "en": "English", "ja": "Japanese", "ko": "Korean",
-    "zh": "Chinese", "es": "Spanish", "pt": "Portuguese", "fr": "French",
-    "de": "German", "ar": "Arabic", "ru": "Russian", "hi": "Hindi",
-    "th": "Thai", "vi": "Vietnamese", "ms": "Malay", "tl": "Filipino",
-}
-# Default untuk system prompt LLM kalau caller gak specify. Whisper default English.
-# Caller (gen_title_desc, _gen_thumbnail_style) selalu pass `lang_name` runtime
-# sesuai hasil Whisper detection, jadi nilai ini cuma fallback internal.
-def _llm_call_json(prompt, lang_name="English", max_retries=1):
+# Whisper return ISO 639-1 code. Pass langsung ke LLM (id, en, ja, ko, ...).
+# NO translation map, NO hardcoded language list, NO fallback template.
+def _llm_call_json(prompt, lang_name="en", max_retries=1):
     import requests
     base = os.environ.get("LLM_BASE_URL", "").rstrip("/")
-    system_msg = (f"You are a native {lang_name} content creator. "
+    system_msg = (f"You are a content creator. "
                   f"You MUST respond ONLY in valid JSON. "
-                  f"All text fields in the JSON MUST be written in 100% fluent {lang_name}.")
+                  f"All text fields in the JSON MUST be written in {lang_name}.")
     
     for attempt in range(max_retries + 1):
         try:
@@ -405,39 +469,31 @@ def gen_title_desc(seg, transcript, lang):
         seg: segment dict {start, end, score, reason, fillers}
         transcript: full Whisper response (must have 'language' key)
         lang: ISO 639-1 code dari Whisper ("id", "en", "ja", ...)
-              Digunakan untuk prompt LLM DAN system_msg -> output match transcript.
+              Langsung dipakai di prompt. NO translation map, NO fallback list.
 
     Raises:
         RuntimeError: kalau LLM gagal (HTTP error / JSON parse / output invalid).
         NO fallback template. Kalau LLM gagal, raise dan caller harus decide.
 
-    Catatan bahasa:
-    - `lang` HARUS dinamis dari Whisper detection (lihat main(): lang=tr.get("language"))
-    - `META_LANG_OVERRIDE` env bisa override untuk testing/rebrand
+    Catatan:
+    - `lang` HARUS dinamis dari LLM detection (lihat main(): lang=detect_lang_llm(tr))
     - Semua internal logs English (untuk CI readability)
+    - Trust model: prompt tegas (100% bahasa target) TANPA post-validator.
     """
-    lang_name = _LANG_NAME.get(lang, "English")
+    # Pass ISO code langsung ke prompt. NO _LANG_NAME translation map.
+    # LLM modern kenal ISO 639-1 codes (id, en, ja, ko, zh, es, pt, fr, de, ar, ...)
     seg_text = seg.get("text") or seg.get("reason", "")
     if not seg_text and "words" in transcript:
         s, e = float(seg["start"]), float(seg["end"])
         ws = [w for w in transcript["words"] if s <= w["start"] < e]
         seg_text = " ".join(w["word"] for w in ws)[:800]
 
-    # Optional: override bahasa via env (untuk testing/rebrand)
-    lang_override = os.environ.get("META_LANG_OVERRIDE", "").strip().lower()
-    if lang_override in _LANG_NAME:
-        lang = lang_override
-        lang_name = _LANG_NAME[lang]
-        log(f"[title-desc] META_LANG_OVERRIDE active: forced lang={lang}")
-
     prompt = (
         f"Generate a title + description for a YouTube Shorts clip (max 60s).\n"
         f"\n"
-        f"=== LANGUAGE RULES (MANDATORY, no exceptions) ===\n"
-        f"Target language = {lang_name} ({lang}).\n"
-        f"The ENTIRE title and description MUST be 100% {lang_name} from start to finish.\n"
-        f"DO NOT use words from other languages.\n"
-        f"If the context contains foreign terms, TRANSLATE or PARAPHRASE to {lang_name}.\n"
+        f"=== LANGUAGE (NON-NEGOTIABLE) ===\n"
+        f"Target language = {lang} (ISO 639-1 code from Whisper).\n"
+        f"The ENTIRE title and description MUST be written in this language.\n"
         f"\n"
         f"=== FORMAT ===\n"
         f"- title: 1 catchy sentence, max 100 chars, 1-2 emoticons\n"
@@ -450,19 +506,22 @@ def gen_title_desc(seg, transcript, lang):
         f"\n"
         f"=== WHY THIS SEGMENT IS INTERESTING ===\n"
         f"{seg.get('reason', '')}\n"
+        f"\n"
+        f"Output should be in {lang}.\n"
     )
 
-    # Pass lang_name ke _llm_call_json -> system prompt jadi konsisten dengan prompt user.
-    data = _llm_call_json(prompt, lang_name=lang_name)
+    # Pass lang (ISO code) ke _llm_call_json sebagai lang_name. TAPI _llm_call_json
+    # system_msg hardcode "native {lang_name} content creator" -- kalau lang_name
+    # cuma ISO code "id", itu aneh. Solusi: pass nama generik atau pass lang langsung.
+    # Di sini pass ISO code langsung; system_msg akan jadi "native id content creator"
+    # yang masih dimengerti LLM (id, en, ja, ... = ISO codes = recognized).
+    data = _llm_call_json(prompt, lang_name=lang)
     title = (data.get("title") or "").strip()[:100] if data else ""
     desc = (data.get("desc") or data.get("description") or "").strip()[:4900] if data else ""
     if not title or not desc:
-        # NO fallback template. Raise supaya caller bisa decide: skip segment
-        # atau stop pipeline. Log jelas (English) untuk CI debugging.
         raise RuntimeError(
             f"LLM returned empty/invalid title+desc for lang={lang}. "
-            f"title_len={len(title)} desc_len={len(desc)}. NO fallback template. "
-            f"Check LLM provider, rate limit, atau prompt compliance."
+            f"title_len={len(title)} desc_len={len(desc)}. NO fallback template."
         )
     log(f"[title-desc] {lang} -> '{title[:60]}'")
     return title, desc
@@ -491,8 +550,7 @@ def _gen_thumbnail_style(seg, transcript, lang, workdir):
 
     Returns:
         Dict {hook_text, font_family, font_size, text_color, emoji_size, vertical_position}.
-        hook_text is in target `lang` (from Whisper detection, with META_LANG_OVERRIDE
-        applied if set).
+        hook_text is in target `lang` (from Whisper detection).
 
     Raises:
         RuntimeError: kalau LLM configured (non-kilo model) tapi gagal total.
@@ -507,12 +565,6 @@ def _gen_thumbnail_style(seg, transcript, lang, workdir):
     - Semua internal logs English.
     """
     import requests as _req
-
-    # Optional: override bahasa via env (untuk testing/rebrand)
-    lang_override = os.environ.get("META_LANG_OVERRIDE", "").strip().lower()
-    if lang_override in _LANG_NAME:
-        log(f"[thumb-style] META_LANG_OVERRIDE active: forced lang={lang_override} (was {lang})")
-        lang = lang_override
 
     # Ambil kata-kata dari transcript berdasarkan start & end segmen
     seg_text = ""
@@ -545,10 +597,9 @@ def _gen_thumbnail_style(seg, transcript, lang, workdir):
         # Pakai default dengan hook_text dari seg['reason'] (dynamic, sesuai bahasa).
         log(f"[thumb-style] LLM skipped (kilo* heuristic), using seg['reason'] as hook: '{default['hook_text'][:40]}'")
         return default
-    lang_name = _LANG_NAME.get(lang, "English")
     prompt = (
             f"Generate a thumbnail spec for a YouTube Shorts clip.\n"
-            f"LANGUAGE: {lang_name} ({lang}). ALL output MUST be in {lang_name}.\n"
+            f"LANGUAGE (ISO 639-1): {lang}. ALL output MUST be in this language.\n"
             f"\n"
             f"=== SCRIPT CONTEXT (transcript segment) ===\n{seg_text}\n"
             f"===\n"
@@ -1182,7 +1233,10 @@ def main():
     log("=" * 60)
     try:
         tr = transcribe(raw)
-        lang = tr.get("language", "en")
+        # Groq Whisper TIDAK return `language` field yang reliable.
+        # Detect via LLM (lihat detect_lang_llm). Falls back ke "unknown"
+        # kalau LLM juga gagal.
+        lang = detect_lang_llm(tr)
         words = tr.get("words", [])
         log(f"PHASE 2: OK lang={lang} words={len(words)} durasi~={tr.get('duration', '?')}s")
     except Exception as e:
@@ -1194,7 +1248,7 @@ def main():
     log("PHASE 3/6: PICK SEGMENTS")
     log("=" * 60)
     try:
-        segs = pick_segments(tr)
+        segs = pick_segments(tr, lang)
         log(f"PHASE 3: OK dapat {len(segs)} segment(s) (max MAX_CLIPS={MAX_CLIPS if 'MAX_CLIPS' in dir() else '?'})")
         for j, s in enumerate(segs):
             log(f"  seg[{j}]: start={float(s.get('start',0)):.1f}s end={float(s.get('end',0)):.1f}s "
