@@ -1,6 +1,12 @@
 {
   "done": [],
   "uploaded": {},
-  "failed": [],
+  "failed": [
+    {
+      "id": "oPebITjEjGs",
+      "reason": "all_segments_upload_skipped",
+      "ts": "2026-09-03T18:50:35.220043"
+    }
+  ],
   "processing": {}
 }
