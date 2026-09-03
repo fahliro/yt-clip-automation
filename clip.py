@@ -361,7 +361,10 @@ _LANG_NAME = {
     "de": "German", "ar": "Arabic", "ru": "Russian", "hi": "Hindi",
     "th": "Thai", "vi": "Vietnamese", "ms": "Malay", "tl": "Filipino",
 }
-def _llm_call_json(prompt, lang_name="Indonesian", max_retries=1):
+# Default untuk system prompt LLM kalau caller gak specify. Whisper default English.
+# Caller (gen_title_desc, _gen_thumbnail_style) selalu pass `lang_name` runtime
+# sesuai hasil Whisper detection, jadi nilai ini cuma fallback internal.
+def _llm_call_json(prompt, lang_name="English", max_retries=1):
     import requests
     base = os.environ.get("LLM_BASE_URL", "").rstrip("/")
     system_msg = (f"You are a native {lang_name} content creator. "
@@ -396,10 +399,22 @@ def _llm_call_json(prompt, lang_name="Indonesian", max_retries=1):
 
 
 def gen_title_desc(seg, transcript, lang):
-    """Generate engaging title + description via LLM.
-    - title: catchy, max 100 char, pake 1-2 emoticon, bahasa = lang
-    - desc: 2-4 kalimat POV viewers, pake emoticon, bahasa = lang
-    Simple approach: prompt tegas (100% bahasa target) + fallback kalau LLM gagal.
+    """Generate engaging title + description via LLM in the target language.
+
+    Args:
+        seg: segment dict {start, end, score, reason, fillers}
+        transcript: full Whisper response (must have 'language' key)
+        lang: ISO 639-1 code dari Whisper ("id", "en", "ja", ...)
+              Digunakan untuk prompt LLM DAN system_msg -> output match transcript.
+
+    Raises:
+        RuntimeError: kalau LLM gagal (HTTP error / JSON parse / output invalid).
+        NO fallback template. Kalau LLM gagal, raise dan caller harus decide.
+
+    Catatan bahasa:
+    - `lang` HARUS dinamis dari Whisper detection (lihat main(): lang=tr.get("language"))
+    - `META_LANG_OVERRIDE` env bisa override untuk testing/rebrand
+    - Semua internal logs English (untuk CI readability)
     """
     lang_name = _LANG_NAME.get(lang, "English")
     seg_text = seg.get("text") or seg.get("reason", "")
@@ -413,6 +428,7 @@ def gen_title_desc(seg, transcript, lang):
     if lang_override in _LANG_NAME:
         lang = lang_override
         lang_name = _LANG_NAME[lang]
+        log(f"[title-desc] META_LANG_OVERRIDE active: forced lang={lang}")
 
     prompt = (
         f"Generate a title + description for a YouTube Shorts clip (max 60s).\n"
@@ -437,22 +453,19 @@ def gen_title_desc(seg, transcript, lang):
     )
 
     # Pass lang_name ke _llm_call_json -> system prompt jadi konsisten dengan prompt user.
-    # Sebelumnya default "Indonesian" bikin LLM bingung kalau target English (prompt user
-    # bilang "Bahasa target = English", tapi system prompt bilang "native Indonesian").
     data = _llm_call_json(prompt, lang_name=lang_name)
-    if data is not None:
-        title = (data.get("title") or "").strip()[:100]
-        desc = (data.get("desc") or data.get("description") or "").strip()[:4900]
-        if title and desc:
-            log(f"[title-desc] {lang} -> '{title[:60]}'")
-            return title, desc
-
-    # Fallback template kalau LLM gagal (English standard, sesuai preferensi user).
-    log(f"[title-desc] LLM gagal -> fallback template (en, requested={lang})")
-    score = seg.get("score", "?")
-    title = f"You won't believe this! 😱 Score {score} 🔥"
-    desc = (seg.get("reason") or "Must watch!") + "\n\nLike & share! 💯 #shorts"
-    return title[:100], desc[:4900]
+    title = (data.get("title") or "").strip()[:100] if data else ""
+    desc = (data.get("desc") or data.get("description") or "").strip()[:4900] if data else ""
+    if not title or not desc:
+        # NO fallback template. Raise supaya caller bisa decide: skip segment
+        # atau stop pipeline. Log jelas (English) untuk CI debugging.
+        raise RuntimeError(
+            f"LLM returned empty/invalid title+desc for lang={lang}. "
+            f"title_len={len(title)} desc_len={len(desc)}. NO fallback template. "
+            f"Check LLM provider, rate limit, atau prompt compliance."
+        )
+    log(f"[title-desc] {lang} -> '{title[:60]}'")
+    return title, desc
 
 
 
@@ -468,24 +481,58 @@ def gen_title_desc(seg, transcript, lang):
 #   4. Fallback: pakai frame tengah + hook default
 import base64 as _b64
 def _gen_thumbnail_style(seg, transcript, lang, workdir):
-    """Generate hook text + visual style untuk thumbnail dari konteks video."""
+    """Generate hook text + visual style untuk thumbnail dari konteks video.
+
+    Args:
+        seg: segment dict {start, end, score, reason, fillers}
+        transcript: full Whisper response (must have 'language' key)
+        lang: ISO 639-1 code dari Whisper ("id", "en", "ja", ...)
+        workdir: working directory
+
+    Returns:
+        Dict {hook_text, font_family, font_size, text_color, emoji_size, vertical_position}.
+        hook_text is in target `lang` (from Whisper detection, with META_LANG_OVERRIDE
+        applied if set).
+
+    Raises:
+        RuntimeError: kalau LLM configured (non-kilo model) tapi gagal total.
+        Kalau model gak support atau "kilo*" (heuristic skip), pakai default
+        dengan hook_text dari seg["reason"] (yang datang dari pick_segments LLM,
+        sudah dalam bahasa target).
+
+    Catatan bahasa:
+    - Default hook_text = `seg.get("reason", "")`[:60] -- BUKAN hardcoded "WATCH!".
+      `reason` dari `pick_segments` LLM sudah in target language (sesuai transcript).
+    - Kalau LLM berhasil, override dengan `hook_text` dari LLM.
+    - Semua internal logs English.
+    """
     import requests as _req
-    
-    # --- PERBAIKAN DI SINI ---
+
+    # Optional: override bahasa via env (untuk testing/rebrand)
+    lang_override = os.environ.get("META_LANG_OVERRIDE", "").strip().lower()
+    if lang_override in _LANG_NAME:
+        log(f"[thumb-style] META_LANG_OVERRIDE active: forced lang={lang_override} (was {lang})")
+        lang = lang_override
+
     # Ambil kata-kata dari transcript berdasarkan start & end segmen
     seg_text = ""
     if transcript and "words" in transcript:
         s, e = float(seg.get("start", 0)), float(seg.get("end", 0))
         ws = [w["word"] for w in transcript["words"] if s <= w["start"] < e]
-        seg_text = " ".join(ws)[:800]  # Extract full conversation transcript
-    
-    # Fallback jika transcript kata kosong
-    if not seg_text.strip():
-        seg_text = seg.get("reason", "WATCH!")
+        seg_text = " ".join(ws)[:800]
 
-    # Default fallback
+    # Default hook_text ambil dari seg["reason"] (dari LLM pick_segments, sudah
+    # dalam bahasa target -> dinamis). Kalau kosong, raise (no hardcoded fallback).
+    seg_reason = seg.get("reason", "").strip()
+    if not seg_reason:
+        raise RuntimeError(
+            f"seg['reason'] kosong untuk hook_text default. "
+            f"Check pick_segments LLM output. lang={lang}"
+        )
+
+    # Default (used when LLM skipped, atau returned empty)
     default = {
-        "hook_text": seg.get("reason", "WATCH!")[:60] or "WATCH!",
+        "hook_text": seg_reason[:60],
         "font_family": "Bebas Neue",
         "font_size": 134,
         "text_color": "#FFE600",
@@ -494,7 +541,10 @@ def _gen_thumbnail_style(seg, transcript, lang, workdir):
     }
     base = os.environ.get("LLM_BASE_URL", "").rstrip("/")
     if not base or "kilo" in (os.environ.get("LLM_MODEL", "").lower()):
-        return default  # skip kalau model gak support (heuristic: kilo*)
+        # Heuristic: model 'kilo*' (text-only) gak bisa generate thumbnail style.
+        # Pakai default dengan hook_text dari seg['reason'] (dynamic, sesuai bahasa).
+        log(f"[thumb-style] LLM skipped (kilo* heuristic), using seg['reason'] as hook: '{default['hook_text'][:40]}'")
+        return default
     lang_name = _LANG_NAME.get(lang, "English")
     prompt = (
             f"Generate a thumbnail spec for a YouTube Shorts clip.\n"
@@ -576,9 +626,13 @@ def _gen_thumbnail_style(seg, transcript, lang, workdir):
                     f"color={default['text_color']} hook='{default['hook_text'][:50]}'")
                 return default
             else:
-                log(f"[thumb-style] LLM output kosong -> default")
+                # LLM returned valid JSON tapi hook_text kosong -> pakai default (seg['reason'])
+                log(f"[thumb-style] LLM returned empty hook_text, using seg['reason'] as hook: '{default['hook_text'][:40]}'")
+                return default
     except Exception as e:
-        log(f"[thumb-style] LLM error: {e} -> default")
+        # LLM gagal total (HTTP / JSON parse error) -> pakai default.
+        # Default hook_text = seg['reason'] (dari pick_segments, sudah dynamic language).
+        log(f"[thumb-style] LLM error ({type(e).__name__}: {e}), using seg['reason'] as hook: '{default['hook_text'][:40]}'")
     return default
 
 
@@ -1173,9 +1227,13 @@ def main():
             title, desc = gen_title_desc(seg, tr, lang)
             log(f"[seg{i}] PHASE 4b: OK title='{title[:60]}' desc_len={len(desc)}")
         except Exception as e:
+            # LLM gagal total -> SKIP segment ini (no fallback template English).
+            # Lanjut ke segment berikutnya. Artifact clip tetap di WORKDIR.
+            # Run berikutnya akan retry kalau raw belum di-mark_done.
             _log_trace(e, f"[seg{i}-title] ")
-            log(f"[seg{i}] PHASE 4b: GAGAL -> fallback template")
-            title, desc = ("You won't believe this! 😱", "Must watch!\n\nLike & share! 💯 #shorts")
+            log(f"[seg{i}] PHASE 4b: GAGAL -> SKIP segment (no fallback, no English output)")
+            upload_errors += 1
+            continue  # skip ke segment berikutnya
 
         # Save meta
         try:
