@@ -410,7 +410,10 @@ def gen_title_desc(seg, transcript, lang):
         f"{seg.get('reason', '')}\n"
     )
 
-    data = _llm_call_json(prompt)
+    # Pass lang_name ke _llm_call_json -> system prompt jadi konsisten dengan prompt user.
+    # Sebelumnya default "Indonesian" bikin LLM bingung kalau target English (prompt user
+    # bilang "Bahasa target = English", tapi system prompt bilang "native Indonesian").
+    data = _llm_call_json(prompt, lang_name=lang_name)
     if data is not None:
         title = (data.get("title") or "").strip()[:100]
         desc = (data.get("desc") or data.get("description") or "").strip()[:4900]
@@ -734,7 +737,11 @@ def gen_thumbnail(clip_path, seg, lang, workdir, raw_path=None, start_offset=0.0
     # Pisah dari vision: text-style butuh konteks NARASI, vision butuh konteks VISUAL
     style = _gen_thumbnail_style(seg, transcript, lang, workdir)
     hook_text = style["hook_text"]
-    # Step 2: Try LLM vision (best-effort, kalau model support -> pilih frame terbaik)
+    # Step 2: Try LLM vision (best-effort, HANYA untuk pilih frame terbaik).
+    # JANGAN minta hook_text lagi di vision step -- vision LLM cuma lihat gambar,
+    # sehingga hook_text dari vision = deskripsi VISUAL (mis. "muka terkejut"),
+    # bukan hook informatif dari transcript. Hook text sudah di-generate
+    # dari transcript oleh _gen_thumbnail_style (line 735), pakai itu.
     try:
         import requests as _req
         base = os.environ.get("LLM_BASE_URL", "").rstrip("/")
@@ -742,9 +749,10 @@ def gen_thumbnail(clip_path, seg, lang, workdir, raw_path=None, start_offset=0.0
         # Encode frames as data URL
         content_parts = [{
             "type": "text",
-            "text": (f"Pilih 1 frame PALING menarik untuk thumbnail YouTube Shorts. "
-                    f"Jawab HANYA JSON: {{\"frame_index\": 0|1|2, \"hook_text\": str (max 5 kata, "
-                    f"POV viewer, ada 1 emoticon, bahasa {lang})}}")
+            "text": (f"Pilih 1 frame PALING menarik untuk thumbnail YouTube Shorts "
+                    f"(ekspresi paling kuat / komposisi paling eye-catching). "
+                    f"Jawab HANYA JSON: {{\"frame_index\": 0|1|2}}. "
+                    f"JANGAN tulis hook_text -- itu sudah di-generate terpisah dari transcript.")
         }]
         for fp in frames:
             data = _b64.b64encode(fp.read_bytes()).decode()
@@ -764,10 +772,9 @@ def gen_thumbnail(clip_path, seg, lang, workdir, raw_path=None, start_offset=0.0
             idx = int(data.get("frame_index", 1))
             if 0 <= idx < len(frames):
                 chosen = frames[idx]
-            hook = (data.get("hook_text") or hook_text).strip()[:60]
-            if hook:
-                hook_text = hook
-                log(f"[thumb] LLM vision: frame {idx} hook='{hook_text}'")
+                log(f"[thumb] LLM vision: pilih frame {idx} (hook tetap dari transcript='{hook_text[:50]}')")
+            else:
+                log(f"[thumb] LLM vision: frame_index out of range, pakai frame tengah")
     except Exception as e:
         log(f"[thumb] LLM vision skip: {e} (fallback ke frame tengah)")
     # Generate thumbnail. Default: HTML+CSS via Playwright (Twemoji + Google Fonts).
