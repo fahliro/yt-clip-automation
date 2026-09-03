@@ -1013,6 +1013,11 @@ def already_done(video_id):
     sendiri tidak men-trigger re-clip dirinya sendiri via WebSub.
     Tanpa ini, setiap Short yang baru di-publish akan dispatch workflow sekali
     lagi untuk clip dirinya sendiri (download + Whisper + LLM + upload).
+
+    Tambahan:
+      - failed{}    : raw IDs yang gagal permanen → skip agar gak retry forever
+      - processing{}: in-flight lock (raw → timestamp saat run mulai).
+                     Skip kalau run paralel untuk video yang sama.
     """
     sf = pathlib.Path(os.environ.get("STATE_FILE", "state.json"))
     if not sf.exists():
@@ -1029,14 +1034,91 @@ def already_done(video_id):
     # Block juga short IDs yang sudah di-upload (mapping raw -> short di uploaded{})
     if video_id in data.get("uploaded", {}):
         return True
+    # Block raw IDs yang pernah gagal permanen (sudah di-flag di failed{}).
+    # failed[] berisi list of dicts {"id": "...", "reason": "...", "ts": "..."}
+    # jadi cek .get("id") untuk setiap entry, bukan `video_id in failed[]` (yang cmpp string vs dict).
+    failed_ids = set()
+    for f in data.get("failed", []):
+        if isinstance(f, dict):
+            failed_ids.add(f.get("id"))
+        elif isinstance(f, str):
+            failed_ids.add(f)
+    if video_id in failed_ids:
+        return True
+    # In-flight lock: skip kalau video_id sedang diproses oleh run lain.
+    # Lock TTL 30 menit — kalau run sebelumnya crash/gak cleanup, lock stale
+    # dan run baru akan overwrite (lihat _acquire_lock).
+    proc = data.get("processing", {})
+    if video_id in proc:
+        ts = proc[video_id]
+        try:
+            age = (datetime.datetime.now() - datetime.datetime.fromisoformat(ts)).total_seconds()
+        except Exception:
+            age = 0
+        if age < 1800:  # 30 menit
+            return True
     return False
+
+
+def _acquire_lock(video_id):
+    """Catat video_id sebagai 'processing' (in-flight lock) di state.json.
+    Return False kalau lock masih hidup (run lain sedang proses).
+    Dipanggil di awal main() SEBELUM already_done final."""
+    sf = pathlib.Path(os.environ.get("STATE_FILE", "state.json"))
+    data = json.loads(sf.read_text()) if sf.exists() else {
+        "done": [], "uploaded": {}, "failed": [], "processing": {}}
+    proc = data.setdefault("processing", {})
+    # Bersihkan lock stale (>30 menit) — anggap run sebelumnya crash.
+    now = datetime.datetime.now()
+    stale = []
+    for k, ts in proc.items():
+        try:
+            if (now - datetime.datetime.fromisoformat(ts)).total_seconds() > 1800:
+                stale.append(k)
+        except Exception:
+            stale.append(k)
+    for k in stale:
+        proc.pop(k, None)
+    if video_id in proc:
+        return False
+    proc[video_id] = now.isoformat()
+    sf.write_text(json.dumps(data, indent=2))
+    return True
+
+
+def _release_lock(video_id):
+    """Hapus entry processing untuk video_id (cleanup di akhir main())."""
+    sf = pathlib.Path(os.environ.get("STATE_FILE", "state.json"))
+    if not sf.exists():
+        return
+    try:
+        data = json.loads(sf.read_text())
+    except (json.JSONDecodeError, OSError):
+        return
+    proc = data.get("processing", {})
+    proc.pop(video_id, None)
+    sf.write_text(json.dumps(data, indent=2))
 
 
 def mark_done(video_id):
     sf = pathlib.Path(os.environ.get("STATE_FILE", "state.json"))
-    data = json.loads(sf.read_text()) if sf.exists() else {"done": [], "uploaded": {}}
+    data = json.loads(sf.read_text()) if sf.exists() else {
+        "done": [], "uploaded": {}, "failed": [], "processing": {}}
     if video_id not in data["done"]:
         data["done"].append(video_id)
+    sf.write_text(json.dumps(data, indent=2))
+
+
+def mark_failed(video_id, reason=""):
+    """Catat raw ID sebagai gagal permanen (mis. limit harian YT).
+    Next run sudah_done() akan return True sehingga gak retry forever."""
+    sf = pathlib.Path(os.environ.get("STATE_FILE", "state.json"))
+    data = json.loads(sf.read_text()) if sf.exists() else {
+        "done": [], "uploaded": {}, "failed": [], "processing": {}}
+    failed = data.setdefault("failed", [])
+    if video_id not in failed:
+        failed.append({"id": video_id, "reason": reason,
+                       "ts": datetime.datetime.now().isoformat()})
     sf.write_text(json.dumps(data, indent=2))
 
 
@@ -1216,6 +1298,26 @@ def main():
         log("PHASE 0: video sudah pernah di-clip (state.json match) -> SKIP")
         return
 
+    # Acquire in-flight lock SEBELUM pipeline jalan. Kalau run lain sedang proses
+    # video yang sama (WebSub duplicate), lock masih hidup → skip. Kalau lock
+    # stale (>30 menit) → auto-replace. Cleanup di finally (lihat akhir main).
+    if not _acquire_lock(video_id):
+        log(f"PHASE 0: video_id={video_id} sedang diproses run lain (in-flight lock) -> SKIP")
+        return
+
+    try:
+        return _run_pipeline(video_id)
+    finally:
+        _release_lock(video_id)
+
+
+def _run_pipeline(video_id):
+    # Wrapper untuk pipeline utama — pisah dari main() supaya lock
+    # bisa di-release di finally regardless of crash.
+    return _run_pipeline_impl(video_id)
+
+
+def _run_pipeline_impl(video_id):
     # PHASE 1: Download raw
     log("=" * 60)
     log("PHASE 1/6: DOWNLOAD raw video")
@@ -1376,11 +1478,19 @@ def main():
     log("=" * 60)
     log(f"FINAL: {total_segs} segment diproses, {upload_errors} upload error")
     log("=" * 60)
-    mark_done(video_id)
+
     if upload_errors and upload_errors == total_segs:
-        log(f"SELESAI (semua upload di-skip, artifact siap di-upload manual)")
+        # Semua upload (mis. limit harian YT) → jangan mark_done biar besok retry.
+        # Tapi catat ke 'failed' agar sistem tahu ini pernah dicoba.
+        # Retry manual: workflow_dispatch → VIDEO_ID input.
+        log("SELESAI (semua upload di-skip/quota, TIDAK di-mark_done → bisa retry manual)")
+        mark_failed(video_id, reason="all_segments_upload_skipped")
     else:
-        log("SELESAI")
+        mark_done(video_id)
+        if upload_errors:
+            log(f"SELESAI (partial: {total_segs - upload_errors}/{total_segs} segment OK)")
+        else:
+            log("SELESAI")
 
 
 if __name__ == "__main__":

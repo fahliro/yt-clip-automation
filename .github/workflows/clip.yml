@@ -80,7 +80,7 @@ jobs:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
-          STATE_FILE: state.json
+          STATE_FILE: ${{ github.workspace }}/state.json
         run: python clip.py
 
       - name: Save state (anti double-clip)
