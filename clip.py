@@ -114,6 +114,24 @@ def transcribe(path):
             log(f"[groq] HTTP {r.status_code}: {r.text[:500]}")
             r.raise_for_status()
     data = r.json()
+    # Log eksplisit bahasa Whisper + sample text biar gampang analisa
+    # di CI log (cek apakah Whisper deteksi benar & transcript bukan auto-detect salah).
+    lang_full = data.get("language", "unknown")
+    _LANG_MAP = {
+        "id": "Indonesian", "en": "English", "ja": "Japanese", "ko": "Korean",
+        "zh": "Chinese", "es": "Spanish", "pt": "Portuguese", "fr": "French",
+        "de": "German", "ar": "Arabic", "ru": "Russian", "hi": "Hindi",
+        "th": "Thai", "vi": "Vietnamese", "ms": "Malay", "tl": "Filipino",
+    }
+    lang_label = _LANG_MAP.get(lang_full, lang_full)
+    # Ambil sample 200 char pertama dari transcript untuk diagnosa
+    _full_text = data.get("text", "").strip()
+    if not _full_text and data.get("segments"):
+        _full_text = " ".join(s.get("text", "") for s in data["segments"]).strip()
+    _sample = (_full_text[:200] + "...") if len(_full_text) > 200 else _full_text
+    log(f"[whisper] detected_lang={lang_full} ({lang_label}) "
+        f"confidence={data.get('language_probability', '?')} "
+        f"text_len={len(_full_text)} sample='{_sample}'")
     # Groq/OpenAI verbose_json: "words" bersarang di dalam "segments", BUKAN top-level.
     # Pipeline butuh list words flat (buat caption + LLM) -> flatten biar caption kebakar.
     if not data.get("words"):
@@ -149,18 +167,22 @@ def pick_segments(transcript):
         if w["end"] - t >= 5:
             chunks.append(f"[{t:.0f}s] " + " ".join(buf))
             t, buf = w["end"], []
+    # Prompt standar English (sesuai preferensi user). Placeholder {lang_name}/{lang}
+    # diisi runtime dari hasil Whisper.
     transcript_for_llm = (
-        "Kamu editor video short. Dari transkrip ber-timestamp berikut, pilih 3-8 segmen "
-        "menarik untuk YouTube Shorts.\n"
-        "DURASI: setiap segmen HARUS 25-45 detik. Kalau momen lucu <25 detik, gabungkan "
-        "dengan konteks sebelum/sesudahnya sampai 25-45 detik. Kalau >45 detik, pilih 25-45 "
-        "detik PALING menarik (skip intro/outro, mulai dari hook).\n"
-        "FILTERS: untuk TIAP segmen WAJIB sertakan 'fillers' = array kata yang bisa "
-        "dibuang (pengisi/filler murni: 'um', 'eh', 'anu', 'apa tuh', dll). JANGAN masukkan "
-        "kata substantif/konten ke fillers. Kosongkan [] kalau tidak ada filler.\n"
-        "FORMAT: JSON array [{start,end,score,reason,fillers}]. start/end = detik absolut "
-        "dari raw video. score virality 1-10. reason singkat (1 kalimat). "
-        "Jawab HANYA JSON (no markdown).\n"
+        "You are a short-form video editor. From the following timestamped "
+        "transcript, pick 3-8 interesting segments for YouTube Shorts.\n"
+        f"TRANSCRIPT LANGUAGE: {data.get('language', 'unknown')}. "
+        "Detect segments based on the transcript language -- do not translate.\n"
+        "DURATION: each segment MUST be 25-45 seconds. If a funny moment is <25s, "
+        "merge it with before/after context until 25-45s. If >45s, pick the "
+        "25-45s MOST interesting portion (skip intro/outro, start at the hook).\n"
+        "FILTERS: for EACH segment you MUST include 'fillers' = array of words "
+        "that can be removed (pure filler words: 'um', 'uh', 'er', 'like', 'you know', etc.). "
+        "DO NOT include substantive/content words in fillers. Use [] if no filler.\n"
+        "FORMAT: JSON array [{start,end,score,reason,fillers}]. start/end = absolute "
+        "seconds from the raw video. virality score 1-10. reason = 1 short sentence.\n"
+        "Respond with ONLY JSON (no markdown).\n"
         + "\n".join(chunks)[:14000]
     )
 
@@ -171,7 +193,7 @@ def pick_segments(transcript):
             headers={"Authorization": f"Bearer {os.environ['LLM_API_KEY']}",
                      "Content-Type": "application/json"},
             json={"model": os.environ["LLM_MODEL"], "messages": [
-                {"role": "system", "content": "Output JSON saja tanpa markdown."},
+                {"role": "system", "content": "Output ONLY valid JSON, no markdown."},
                 {"role": "user", "content": transcript_for_llm}]},
             timeout=120,
         )
@@ -179,7 +201,7 @@ def pick_segments(transcript):
             log(f"[llm] HTTP {r.status_code} url={base}/chat/completions body={r.text[:300]}")
             r.raise_for_status()
     except Exception as e:
-        log(f"[llm] error: {e} -> fallback potong 45s")
+        log(f"[llm] error: {e} -> fallback 45s chunks")
         return [{"start": i, "end": min(i + 45, words[-1]["end"]), "score": 5,
                  "reason": "fallback-llm-error", "fillers": DEFAULT_FILLERS}
                 for i in range(0, int(words[-1]["end"]), 45)]
@@ -340,7 +362,9 @@ _LANG_NAME = {
 def _llm_call_json(prompt, lang_name="Indonesian", max_retries=1):
     import requests
     base = os.environ.get("LLM_BASE_URL", "").rstrip("/")
-    system_msg = f"You are a native {lang_name} content creator. You MUST respond ONLY in valid JSON. All text fields in the JSON MUST be written in 100% fluent {lang_name}."
+    system_msg = (f"You are a native {lang_name} content creator. "
+                  f"You MUST respond ONLY in valid JSON. "
+                  f"All text fields in the JSON MUST be written in 100% fluent {lang_name}.")
     
     for attempt in range(max_retries + 1):
         try:
@@ -389,24 +413,24 @@ def gen_title_desc(seg, transcript, lang):
         lang_name = _LANG_NAME[lang]
 
     prompt = (
-        f"Buat title + description untuk YouTube Shorts (max 60 detik).\n"
+        f"Generate a title + description for a YouTube Shorts clip (max 60s).\n"
         f"\n"
-        f"=== ATURAN BAHASA (WAJIB, tanpa exception) ===\n"
-        f"Bahasa target = {lang_name} ({lang}).\n"
-        f"SELURUH title dan description HARUS 100% {lang_name} dari awal sampai akhir.\n"
-        f"JANGAN pakai kata dari bahasa lain.\n"
-        f"Kalau konteks mengandung istilah asing, TRANSLATE atau PARAPHRASE ke {lang_name}.\n"
+        f"=== LANGUAGE RULES (MANDATORY, no exceptions) ===\n"
+        f"Target language = {lang_name} ({lang}).\n"
+        f"The ENTIRE title and description MUST be 100% {lang_name} from start to finish.\n"
+        f"DO NOT use words from other languages.\n"
+        f"If the context contains foreign terms, TRANSLATE or PARAPHRASE to {lang_name}.\n"
         f"\n"
         f"=== FORMAT ===\n"
-        f"- title: 1 kalimat catchy, max 100 char, 1-2 emoticon\n"
-        f"- desc: 2-4 kalimat engaging + 1-2 hashtag relevan + CTA (like/comment/share)\n"
-        f"- POV: sudut pandang VIEWER (yang nonton & react), bukan uploader.\n"
-        f"- Output JSON valid: {{\"title\": str, \"desc\": str}}\n"
+        f"- title: 1 catchy sentence, max 100 chars, 1-2 emoticons\n"
+        f"- desc: 2-4 engaging sentences + 1-2 relevant hashtags + CTA (like/comment/share)\n"
+        f"- POV: from the VIEWER's perspective (the person watching & reacting), not the uploader.\n"
+        f"- Output valid JSON: {{\"title\": str, \"desc\": str}}\n"
         f"\n"
-        f"=== KONTEKS SCRIPT ===\n"
+        f"=== SCRIPT CONTEXT ===\n"
         f"{seg_text}\n"
         f"\n"
-        f"=== ALASAN SEGMENT INI MENARIK ===\n"
+        f"=== WHY THIS SEGMENT IS INTERESTING ===\n"
         f"{seg.get('reason', '')}\n"
     )
 
@@ -421,18 +445,11 @@ def gen_title_desc(seg, transcript, lang):
             log(f"[title-desc] {lang} -> '{title[:60]}'")
             return title, desc
 
-    # Fallback template kalau LLM gagal
-    log(f"[title-desc] LLM gagal -> fallback template ({lang})")
+    # Fallback template kalau LLM gagal (English standard, sesuai preferensi user).
+    log(f"[title-desc] LLM gagal -> fallback template (en, requested={lang})")
     score = seg.get("score", "?")
-    if lang == "id":
-        title = f"Kamu gak bakal nyangka! 😱 Skor {score} 🔥"
-        desc = (seg.get("reason") or "Wajib tonton!") + "\n\nLike ya! 💯 #shorts"
-    elif lang == "en":
-        title = f"You won't believe this! 😱 Score {score} 🔥"
-        desc = (seg.get("reason") or "Must watch!") + "\n\nLike & share! 💯 #shorts"
-    else:
-        title = f"{lang_name} highlight! 😱 Skor {score} 🔥"
-        desc = (seg.get("reason") or f"Watch this {lang_name} clip!") + f"\n\nLike ya! 💯 #shorts"
+    title = f"You won't believe this! 😱 Score {score} 🔥"
+    desc = (seg.get("reason") or "Must watch!") + "\n\nLike & share! 💯 #shorts"
     return title[:100], desc[:4900]
 
 
@@ -458,15 +475,15 @@ def _gen_thumbnail_style(seg, transcript, lang, workdir):
     if transcript and "words" in transcript:
         s, e = float(seg.get("start", 0)), float(seg.get("end", 0))
         ws = [w["word"] for w in transcript["words"] if s <= w["start"] < e]
-        seg_text = " ".join(ws)[:800]  # Ambil transkrip percakapan utuh
+        seg_text = " ".join(ws)[:800]  # Extract full conversation transcript
     
     # Fallback jika transcript kata kosong
     if not seg_text.strip():
-        seg_text = seg.get("reason", "TONTON!")
+        seg_text = seg.get("reason", "WATCH!")
 
     # Default fallback
     default = {
-        "hook_text": seg.get("reason", "TONTON!")[:60] or "TONTON!",
+        "hook_text": seg.get("reason", "WATCH!")[:60] or "WATCH!",
         "font_family": "Bebas Neue",
         "font_size": 134,
         "text_color": "#FFE600",
@@ -478,53 +495,53 @@ def _gen_thumbnail_style(seg, transcript, lang, workdir):
         return default  # skip kalau model gak support (heuristic: kilo*)
     lang_name = _LANG_NAME.get(lang, "English")
     prompt = (
-            f"Generate thumbnail spec untuk YouTube Shorts.\n"
-            f"BAHASA: {lang_name} ({lang}). SEMUA output WAJIB bahasa {lang_name}.\n"
+            f"Generate a thumbnail spec for a YouTube Shorts clip.\n"
+            f"LANGUAGE: {lang_name} ({lang}). ALL output MUST be in {lang_name}.\n"
             f"\n"
-            f"=== KONTEKS SCRIPT (transcript segment) ===\n{seg_text}\n"
+            f"=== SCRIPT CONTEXT (transcript segment) ===\n{seg_text}\n"
             f"===\n"
             f"\n"
-            f"TUGAS: Baca script di atas, lalu buat hook text yang:\n"
-            f"  1. INFORMATIF — mengandung konteks SPESIFIK dari script (plot twist, punchline, info kunci)\n"
-            f"  2. PENASARAN (teaser) — bikin penasaran klik video, tapi BUKAN kalimat nggantung kosong\n"
-            f"  3. POV viewer (bukan uploader)\n"
-            f"  4. Max 7 kata, 1-2 emoticon\n"
-            f"  5. JANGAN deskripsi visual/gambar/frame\n"
-            f"  6. JANGAN generic ('Wajib tonton!', 'Video ini...')\n"
-            f"  7. JANGAN kalimat nggantung tanpa konteks ('Mau tau caranya?', 'Cek selengkapnya!')\n"
+            f"TASK: Read the script above, then create a hook text that:\n"
+            f"  1. INFORMATIVE -- contains SPECIFIC context from the script (plot twist, punchline, key info)\n"
+            f"  2. TEASER -- makes viewers curious enough to click, but NOT a hanging empty sentence\n"
+            f"  3. VIEWER POV (not uploader)\n"
+            f"  4. Max 7 words, 1-2 emoticons\n"
+            f"  5. NO visual/image/frame description\n"
+            f"  6. NO generic phrases ('Must watch!', 'This video...', 'Check this out!')\n"
+            f"  7. NO hanging context-less sentences ('Want to know how?', 'Find out more!')\n"
             f"\n"
             f"OUTPUT JSON (no markdown):\n"
             f"{{\n"
-            f'  "hook_text": str (WAJIB refer ke konten script),\\n'
-            f'  "font_family": str (salah satu: "Bebas Neue" | "Anton" | "Inter" | "Roboto" | "Poppins"),\\n'
-            f'  "font_size": int (90-200, default 134),\\n'
-            f'  "text_color": hex color string (mis. "#FFE600" kuning, "#FFFFFF" putih, "#FF1744" merah),\\n'
-            f'  "emoji_size": int (80-200, default 144),\\n'
-            f'  "vertical_position": salah satu "top" | "center" | "bottom"\\n'
-            f"}}\\n"
+            f'  "hook_text": str (MUST reference script content),\n'
+            f'  "font_family": str (one of: "Bebas Neue" | "Anton" | "Inter" | "Roboto" | "Poppins"),\n'
+            f'  "font_size": int (90-200, default 134),\n'
+            f'  "text_color": hex color string (e.g. "#FFE600" yellow, "#FFFFFF" white, "#FF1744" red),\n'
+            f'  "emoji_size": int (80-200, default 144),\n'
+            f'  "vertical_position": one of "top" | "center" | "bottom"\n'
+            f"}}\n"
             f"\n"
-            f"=== CONTOH (GOOD vs BAD) ===\n"
+            f"=== EXAMPLES (GOOD vs BAD) ===\n"
             f"\n"
-            f"Script: 'Ternyata suara itu AI, bukan manusia asli!'\n"
-            f"  GOOD hook: 'AI ngaku manusia! 🤯' (informatif + penasaran, ada konteks)\n"
-            f"  GOOD hook: 'Suara itu AI?! 😱' (teaser, spesifik ke script)\n"
-            f"  BAD hook: 'Muka terkejut' (deskripsi visual, JANGAN)\n"
-            f"  BAD hook: 'Wajib tonton!' (generic, JANGAN)\n"
-            f"  BAD hook: 'Mau tau caranya?' (nggantung tanpa konteks, JANGAN)\n"
+            f"Script: 'Turns out the voice was AI, not a real person!'\n"
+            f"  GOOD hook: 'AI pretending to be human! 🤯' (informative + curious, has context)\n"
+            f"  GOOD hook: 'That voice was AI?! 😱' (teaser, specific to script)\n"
+            f"  BAD hook: 'Shocked face' (visual description, NO)\n"
+            f"  BAD hook: 'Must watch!' (generic, NO)\n"
+            f"  BAD hook: 'Want to know how?' (hanging without context, NO)\n"
             f"\n"
-            f"Script: 'Plot twist: ternyata dia adiknya sendiri!'\n"
-            f"  GOOD hook: 'Plot twist gila! 😱' (informatif + penasaran)\n"
-            f"  GOOD hook: 'Mereka bersaudara!?' (teaser, spesifik)\n"
-            f"  BAD hook: 'Muka sedih' (visual, JANGAN)\n"
-            f"  BAD hook: 'Cek selengkapnya!' (nggantung kosong, JANGAN)\n"
+            f"Script: 'Plot twist: turns out they are siblings!'\n"
+            f"  GOOD hook: 'Insane plot twist! 😱' (informative + curious)\n"
+            f"  GOOD hook: 'They are siblings!?' (teaser, specific)\n"
+            f"  BAD hook: 'Sad face' (visual, NO)\n"
+            f"  BAD hook: 'Check it out!' (hanging empty, NO)\n"
             f"\n"
-            f"Script: '5 tips supaya tidur nyenyak. Tips 3: matikan HP 1 jam sebelum tidur.'\n"
-            f"  GOOD hook: 'Tips 3 paling penting! 💡' (informatif + penasaran)\n"
-            f"  GOOD hook: 'Matikan HP sebelum tidur? 📱' (teaser, spesifik)\n"
-            f"  BAD hook: 'Orang ngorok' (visual, JANGAN)\n"
-            f"  BAD hook: 'Gimana caranya?' (nggantung kosong, JANGAN)\n"
+            f"Script: '5 tips to sleep well. Tip 3: turn off phone 1 hour before bed.'\n"
+            f"  GOOD hook: 'Tip 3 is crucial! 💡' (informative + curious)\n"
+            f"  GOOD hook: 'Turn off phone before bed? 📱' (teaser, specific)\n"
+            f"  BAD hook: 'Person snoring' (visual, NO)\n"
+            f"  BAD hook: 'How do you do it?' (hanging empty, NO)\n"
             f"\n"
-            f"=== INGAT: hook_text HARUS tentang SCRIPT, bukan GAMBAR ==="
+            f"=== REMEMBER: hook_text MUST be about the SCRIPT, not the IMAGE ==="
         )
     try:
         r = _req.post(
@@ -532,7 +549,7 @@ def _gen_thumbnail_style(seg, transcript, lang, workdir):
             headers={"Authorization": f"Bearer {os.environ['LLM_API_KEY']}",
                      "Content-Type": "application/json"},
             json={"model": os.environ["LLM_MODEL"], "messages": [
-                {"role": "system", "content": "Output JSON saja tanpa markdown."},
+                {"role": "system", "content": "Output ONLY valid JSON, no markdown."},
                 {"role": "user", "content": prompt}]},
             timeout=60,
         )
@@ -540,7 +557,7 @@ def _gen_thumbnail_style(seg, transcript, lang, workdir):
             content = _re.sub(r"```(?:json)?", "", r.json()["choices"][0]["message"]["content"]).strip().strip("`")
             data = json.loads(content)
             # Trust prompt: kalau LLM kasih hook_text, pakai langsung.
-            # Bahasa compliance sudah dijaga prompt ("SEMUA output WAJIB bahasa X").
+            # Bahasa compliance sudah dijaga prompt ("ALL output MUST be in X").
             full_text = (data.get("hook_text") or "").strip()
             if full_text:
                 default["hook_text"] = full_text[:60]
@@ -749,10 +766,10 @@ def gen_thumbnail(clip_path, seg, lang, workdir, raw_path=None, start_offset=0.0
         # Encode frames as data URL
         content_parts = [{
             "type": "text",
-            "text": (f"Pilih 1 frame PALING menarik untuk thumbnail YouTube Shorts "
-                    f"(ekspresi paling kuat / komposisi paling eye-catching). "
-                    f"Jawab HANYA JSON: {{\"frame_index\": 0|1|2}}. "
-                    f"JANGAN tulis hook_text -- itu sudah di-generate terpisah dari transcript.")
+            "text": (f"Pick 1 MOST visually striking frame for a YouTube Shorts thumbnail "
+                    f"(strongest expression / most eye-catching composition). "
+                    f"Respond with ONLY JSON: {{\"frame_index\": 0|1|2}}. "
+                    f"DO NOT write hook_text -- it is generated separately from the transcript.")
         }]
         for fp in frames:
             data = _b64.b64encode(fp.read_bytes()).decode()
@@ -762,7 +779,7 @@ def gen_thumbnail(clip_path, seg, lang, workdir, raw_path=None, start_offset=0.0
             headers={"Authorization": f"Bearer {os.environ.get('LLM_API_KEY', '')}",
                      "Content-Type": "application/json"},
             json={"model": model, "messages": [
-                {"role": "system", "content": "Output JSON saja tanpa markdown."},
+                {"role": "system", "content": "Output ONLY valid JSON, no markdown."},
                 {"role": "user", "content": content_parts}]},
             timeout=60,
         )
@@ -772,11 +789,11 @@ def gen_thumbnail(clip_path, seg, lang, workdir, raw_path=None, start_offset=0.0
             idx = int(data.get("frame_index", 1))
             if 0 <= idx < len(frames):
                 chosen = frames[idx]
-                log(f"[thumb] LLM vision: pilih frame {idx} (hook tetap dari transcript='{hook_text[:50]}')")
+                log(f"[thumb] LLM vision: picked frame {idx} (hook still from transcript='{hook_text[:50]}')")
             else:
-                log(f"[thumb] LLM vision: frame_index out of range, pakai frame tengah")
+                log(f"[thumb] LLM vision: frame_index out of range, using middle frame")
     except Exception as e:
-        log(f"[thumb] LLM vision skip: {e} (fallback ke frame tengah)")
+        log(f"[thumb] LLM vision skip: {e} (fallback to middle frame)")
     # Generate thumbnail. Default: HTML+CSS via Playwright (Twemoji + Google Fonts).
     # Set THUMBNAIL_HTML=0 untuk fallback ke PIL (gak butuh Chromium).
     use_html = os.environ.get("THUMBNAIL_HTML", "1") != "0"
@@ -1148,7 +1165,7 @@ def main():
         except Exception as e:
             _log_trace(e, f"[seg{i}-title] ")
             log(f"[seg{i}] PHASE 4b: GAGAL -> fallback template")
-            title, desc = ("Kamu gak bakal nyangka! 😱", "Wajib tonton!\n\nLike ya! 💯 #shorts")
+            title, desc = ("You won't believe this! 😱", "Must watch!\n\nLike & share! 💯 #shorts")
 
         # Save meta
         try:
