@@ -1460,10 +1460,17 @@ def _run_pipeline_impl(video_id):
         if thumb and video_id_yt:
             log(f"[seg{i}] PHASE 5b: SET thumbnail on YouTube")
             try:
-                set_thumbnail(video_id_yt, thumb)
-                log(f"[seg{i}] PHASE 5b: OK thumb set")
+                # set_thumbnail returns False on failure (HTTP 4xx/5xx).
+                # Previously this branch always logged "OK" — fix to surface failure.
+                thumb_ok = set_thumbnail(video_id_yt, thumb)
+                if thumb_ok:
+                    log(f"[seg{i}] PHASE 5b: OK thumb set")
+                else:
+                    log(f"[seg{i}] PHASE 5b: FAIL thumb (HTTP error logged above) - video tetap ter-upload tanpa custom thumb")
+                    log(f"[seg{i}] PHASE 5b: TIP: akun harus verified + punya izin upload custom thumbnail")
             except Exception as e:
                 _log_trace(e, f"[seg{i}-thumb-set] ")
+                log(f"[seg{i}] PHASE 5b: SKIP thumbnail (lanjut upload tanpa custom thumb)")
 
         # PHASE 6: Cross-post Meta
         log(f"[seg{i}] PHASE 6/6: CROSS-POST Meta (FB Reels + IG Reels)")
