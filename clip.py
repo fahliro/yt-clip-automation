@@ -1218,28 +1218,24 @@ def upload_to_instagram_reels(clip_path, title, description):
     # IG Graph API *mesti* dapat direct video URL (HTTPS, public, .mp4).
     # URL page view (facebook.com/{id}/videos/{vid}) = HTML page -> IG fetch
     # error "Media download has failed". Fix: ambil `source` field dari Graph API
-    # /{video-id}?fields=videos{source} -> URL CDN langsung ke file .mp4.
+    # /{video-id}?fields=source -> URL CDN langsung ke file .mp4.
+    # NOTE: field `videos` di Video object tidak ada — pakai `source` langsung.
     video_url = None
     try:
         log(f"[meta-ig] resolving direct URL for fb_video={fb_vid}...")
         rv = requests.get(
             f"https://graph.facebook.com/v22.0/{fb_vid}",
-            params={"fields": "videos{source,length}", "access_token": tok},
+            params={"fields": "source,length,format", "access_token": tok},
             timeout=30,
         )
         if rv.ok:
             j = rv.json()
-            # struktur: {"videos":{"data":[{"source":"https://...","length":N}]}}
-            src_list = j.get("videos", {}).get("data", [])
-            if src_list:
-                src = src_list[0].get("source", "")
-                if src and "http" in src.lower():
-                    video_url = src
-                    log(f"[meta-ig] resolved direct URL (len={src_list[0].get('length')}s): {src[:80]}...")
-                else:
-                    log(f"[meta-ig] resolve: source field kosong/tidak valid")
+            src = j.get("source", "")
+            if src and "http" in src.lower():
+                video_url = src
+                log(f"[meta-ig] resolved direct URL (len={j.get('length')}s, format={j.get('format')}): {src[:80]}...")
             else:
-                log(f"[meta-ig] resolve: tidak ada videos.data — respon={rv.text[:300]}")
+                log(f"[meta-ig] resolve: source field kosong/tidak valid: {rv.text[:200]}")
         else:
             log(f"[meta-ig] resolve gagal HTTP {rv.status_code}: {rv.text[:200]}")
     except Exception as e:
