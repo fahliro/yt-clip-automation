@@ -678,10 +678,14 @@ def _gen_thumbnail_style(seg, transcript, lang, workdir):
                     default["text_color"] = data["text_color"]
                 try: default["emoji_size"] = int(data.get("emoji_size", 144))
                 except Exception: pass
-                if data.get("vertical_position") in ("top", "center", "bottom"):
-                    default["vertical_position"] = data["vertical_position"]
+                # vertical_position TIDAK di-override dari LLM. Default tetap "center"
+                # sesuai user request: thumb hook text selalu di tengah canvas.
+                # LLM kadang pilih "top"/"bottom" yang kurang ideal untuk
+                # Reels/Shorts feed (area top/bottom tertutup UI platform).
+                # Verified 2026-09-04 by user feedback.
                 log(f"[thumb-style] {lang} font={default['font_family']} "
-                    f"color={default['text_color']} hook='{default['hook_text'][:50]}'")
+                    f"color={default['text_color']} hook='{default['hook_text'][:50]}' "
+                    f"pos={default['vertical_position']} (locked)")
                 return default
             else:
                 # LLM returned valid JSON tapi hook_text kosong -> pakai default (seg['reason'])
