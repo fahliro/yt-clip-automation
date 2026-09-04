@@ -1338,26 +1338,31 @@ def cross_post_meta(clip_path, title, description, thumb_path=None):
     (pakai FB video_id sebagai source untuk IG container).
 
     Args:
-        clip_path: path ke video clip yg akan di-upload
+        clip_path: path ke video clip yg akan di-upload (idealnya sudah
+                   burned first-frame thumbnail, lihat burn_thumb_into_clip).
+                   Caller di main() pass `clip_to_post` (which is `clip_with_thumb`
+                   kalau burn sukses, fallback ke `clip`).
         title: judul Reels
         description: caption Reels
-        thumb_path: optional path ke custom thumbnail JPG (1080x1920).
-                    Kalau ada, di-upload ke FB Reels sebagai custom thumbnail.
-    Returns: {"fb": vid, "ig": mid, "fb_thumb_ok": bool} atau None kalau FB gagal.
+        thumb_path: DEPRECATED — sebelumnya di-upload ke FB Reels via
+                    /thumbnails endpoint sebagai custom thumbnail. Sekarang
+                    tidak dipakai karena burned first-frame sudah cukup untuk
+                    FB (auto-detect) dan IG (first-frame = thumbnail).
+                    Parameter tetap di-pertahankan untuk backward compat
+                    dengan caller lain.
+    Returns: {"fb": vid, "ig": mid} atau None kalau FB gagal.
     """
     fb_vid = upload_to_facebook_reels(clip_path, title, description)
     if not fb_vid:
         return None
-    # Set custom thumbnail ke FB Reels (best-effort, soft-fail kalau akun belum verified)
-    fb_thumb_ok = False
-    if thumb_path and pathlib.Path(thumb_path).exists():
-        fb_thumb_ok = _fb_set_thumbnail(fb_vid, thumb_path)
-        if not fb_thumb_ok:
-            log(f"[cross-post] FB thumb skip (akun mungkin belum verified) - video tetap ter-upload dengan default thumb")
+    # NOTE: dulu panggil _fb_set_thumbnail(fb_vid, thumb_path) di sini.
+    # Dihapus karena PHASE 4d (burn_thumb_into_clip) sudah burn JPG ke first
+    # frame clip_path, dan FB akan auto-detect first-frame sebagai thumbnail
+    # (atau pakai burned image langsung). Tidak perlu API call terpisah.
     # Set env var sementara biar upload_to_instagram_reels bisa baca
     os.environ["META_LAST_FB_VIDEO_ID"] = fb_vid
     ig_vid = upload_to_instagram_reels(clip_path, title, description)
-    return {"fb": fb_vid, "ig": ig_vid, "fb_thumb_ok": fb_thumb_ok}
+    return {"fb": fb_vid, "ig": ig_vid}
 
 
 # ---------------------------------------------------------------- 4e. BURN THUMB INTO FIRST FRAME
@@ -1702,21 +1707,11 @@ def _run_pipeline_impl(video_id):
             log(f"[seg{i}] PHASE 5: error (non-HTTP) — artifact clip tetap di WORKDIR")
             upload_errors += 1
 
-        # Set thumbnail on YouTube
-        if thumb and video_id_yt:
-            log(f"[seg{i}] PHASE 5b: SET thumbnail on YouTube")
-            try:
-                # set_thumbnail returns False on failure (HTTP 4xx/5xx).
-                # Previously this branch always logged "OK" — fix to surface failure.
-                thumb_ok = set_thumbnail(video_id_yt, thumb)
-                if thumb_ok:
-                    log(f"[seg{i}] PHASE 5b: OK thumb set")
-                else:
-                    log(f"[seg{i}] PHASE 5b: FAIL thumb (HTTP error logged above) - video tetap ter-upload tanpa custom thumb")
-                    log(f"[seg{i}] PHASE 5b: TIP: akun harus verified + punya izin upload custom thumbnail")
-            except Exception as e:
-                _log_trace(e, f"[seg{i}-thumb-set] ")
-                log(f"[seg{i}] PHASE 5b: SKIP thumbnail (lanjut upload tanpa custom thumb)")
+        # NOTE: thumbnail sudah dibakar ke first frame di PHASE 4d, jadi
+        # SEMUA platform (YT, FB, IG) pakai first-frame sebagai thumbnail.
+        # Tidak perlu panggil thumbnails.set (YT) atau /thumbnails endpoint (FB)
+        # lagi — burned first frame sudah cukup. PHASE 5b (YT set_thumbnail)
+        # dan _fb_set_thumbnail di cross_post_meta sudah dihapus.
 
         # PHASE 6: Cross-post Meta (FB Reels + IG Reels)
         log(f"[seg{i}] PHASE 6/6: CROSS-POST Meta (FB Reels + IG Reels)")
@@ -1731,7 +1726,7 @@ def _run_pipeline_impl(video_id):
         try:
             result = cross_post_meta(clip_to_post, title, desc, thumb_path=str(thumb) if thumb and pathlib.Path(thumb).exists() else None)
             if result:
-                log(f"[seg{i}] PHASE 6: OK cross-post fb={result.get('fb')} ig={result.get('ig')} fb_thumb_ok={result.get('fb_thumb_ok')}")
+                log(f"[seg{i}] PHASE 6: OK cross-post fb={result.get('fb')} ig={result.get('ig')}")
             else:
                 log(f"[seg{i}] PHASE 6: skip (FB upload gagal, tidak coba IG)")
         except Exception as e:
