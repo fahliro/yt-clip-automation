@@ -1360,6 +1360,90 @@ def cross_post_meta(clip_path, title, description, thumb_path=None):
     return {"fb": fb_vid, "ig": ig_vid, "fb_thumb_ok": fb_thumb_ok}
 
 
+# ---------------------------------------------------------------- 4e. BURN THUMB INTO FIRST FRAME
+def burn_thumb_into_clip(clip_path, thumb_path, idx, hold_seconds=1.0):
+    """Burn a thumbnail JPG as a still frame at the START of the clip, so that
+    platforms without a "set custom thumbnail" endpoint (notably Instagram
+    Reels, which auto-extracts from the first frame) get the same hook image
+    as the YouTube / Facebook custom thumbnail.
+
+    Output: `<WORKDIR>/clip_thumb_<idx>.mp4` — same codecs (libx264/aac) so
+    Facebook/IG transcoding doesn't barf. Returns output path on success,
+    None on failure (caller should fall back to plain `clip_path`).
+
+    Why: IG Graph API (v22.0) has no `set_thumbnail` endpoint for Reels.
+    First frame IS the thumbnail. Burning once into the clip propagates to
+    both FB (via upload multipart) and IG (via FB-hosted CDN URL).
+
+    Why hold_seconds=1.0: too short (<0.3s) doesn't register as a "frame"
+    after FB transcoding; too long (>2s) looks like a frozen/broken clip
+    when users see it in the Reels feed preview. 1.0s is the sweet spot
+    — long enough to be cached by IG's first-frame extractor, short enough
+    to feel intentional not broken.
+    """
+    out = WORKDIR / f"clip_thumb_{idx:02d}.mp4"
+    if not pathlib.Path(clip_path).exists():
+        log(f"[burn-thumb] clip not found: {clip_path}"); return None
+    if not pathlib.Path(thumb_path).exists():
+        log(f"[burn-thumb] thumb not found: {thumb_path}"); return None
+    try:
+        # Probe durasi clip untuk hitung trim offset (kita hold 1.0s di awal,
+        # jadi video asli mulai dari t=hold_seconds).
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(clip_path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        try:
+            clip_dur = float(probe.stdout.strip() or 0)
+        except Exception:
+            clip_dur = 0
+        if clip_dur <= 0:
+            log(f"[burn-thumb] ffprobe gagal dapat durasi, fallback skip")
+            return None
+        # Filter: JPG (loop 1 frame) di-scale 1080:1920 + format yuv420p
+        # di-hold `hold_seconds`. Video asli di-trim 0..(clip_dur-hold) untuk
+        # total durasi tetap ~clip_dur. Lalu concat (still + video).
+        # NOTE: pakai [v0] untuk still, [v1] untuk trimmed video.
+        fc = (
+            f"[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
+            f"crop=1080:1920,format=yuv420p,"
+            f"fps=30,setpts=PTS-STARTPTS,"
+            f"trim=duration={hold_seconds},setpts=PTS-STARTPTS[v0];"
+            f"[1:v]trim=start={hold_seconds},setpts=PTS-STARTPTS,"
+            f"scale=1080:1920:force_original_aspect_ratio=increase,"
+            f"crop=1080:1920,format=yuv420p[v1];"
+            f"[v0][v1]concat=n=2:v=1:a=0[outv]"
+        )
+        # Audio: trim offset `hold_seconds` dari clip asli (skip 1 detik awal)
+        # lalu gabung. Kalau clip gak ada audio, skip mapping audio.
+        # Kita set -map 1:a? dengan filter aselect biar audio start setelah hold.
+        af = f"[1:a]asetpts=PTS-STARTPTS,atrim=start=0[outa]"
+        # Pakai -t total durasi clip_dur eksplisit (hold + (clip_dur - hold) = clip_dur)
+        # supaya predictable. Hindari -shortest karena audio bisa lebih pendek
+        # kalau video asli di-trim dari hold_seconds.
+        cmd = [
+            "ffmpeg", "-y",
+            "-loop", "1", "-t", str(hold_seconds), "-i", str(thumb_path),
+            "-i", str(clip_path),
+            "-filter_complex", fc + ";" + af,
+            "-map", "[outv]", "-map", "[outa]",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-c:a", "aac", "-b:a", "128k",
+            "-t", str(clip_dur),
+            str(out),
+        ]
+        log(f"[burn-thumb] idx={idx} hold={hold_seconds}s clip_dur={clip_dur:.2f}s -> {out.name}")
+        run(cmd)
+        if out.exists() and out.stat().st_size > 0:
+            log(f"[burn-thumb] OK {out} ({out.stat().st_size}B)")
+            return out
+        log(f"[burn-thumb] ffmpeg selesai tapi file kosong/tdk ada")
+    except Exception as e:
+        log(f"[burn-thumb] error: {e}")
+    return None
+
+
 # ---------------------------------------------------------------- POLL (cron fallback)
 def poll_latest():
     """Cek video terbaru di channel via videos.list (butuh YT_READ_TOKEN,
@@ -1544,11 +1628,38 @@ def _run_pipeline_impl(video_id):
             except Exception as e:
                 _log_trace(e, f"[seg{i}-meta-update] ")
 
-        # PHASE 5: Upload YouTube
-        log(f"[seg{i}] PHASE 5/6: UPLOAD to YouTube")
+        # PHASE 4d: Burn thumbnail ke first frame clip (untuk IG Reels)
+        # IG Graph API tidak punya set_thumbnail endpoint — first frame = thumbnail.
+        # YT pakai thumbnails.set API (sudah jalan di PHASE 5b), tapi FB/IG tidak.
+        # Burn thumb ke clip khusus untuk cross-post (clip original tetap utuh untuk YT).
+        log(f"[seg{i}] PHASE 4d/6: BURN thumb into first frame (for IG Reels)")
+        clip_with_thumb = None
+        if thumb and pathlib.Path(thumb).exists():
+            try:
+                clip_with_thumb = burn_thumb_into_clip(clip, thumb, i, hold_seconds=1.0)
+                if clip_with_thumb:
+                    log(f"[seg{i}] PHASE 4d: OK clip_with_thumb={clip_with_thumb}")
+                else:
+                    log(f"[seg{i}] PHASE 4d: SKIP (burn gagal) - cross-post pakai clip original")
+            except Exception as e:
+                _log_trace(e, f"[seg{i}-burn-thumb] ")
+                log(f"[seg{i}] PHASE 4d: SKIP burn (lanjut cross-post pakai clip original)")
+        else:
+            log(f"[seg{i}] PHASE 4d: SKIP (thumb kosong) - cross-post pakai clip original")
+
+        # PHASE 5: Upload YouTube (semua platform pakai clip dengan thumb burned
+        # ke first frame — YT, FB, IG semua. YT thumbnails.set sudah jalan di
+        # PHASE 5b, tapi first-frame burned-thumbnail bikin konsistensi 3 platform.)
+        log(f"[seg{i}] PHASE 5/6: UPLOAD to YouTube (clip_with_thumb)")
+        # Pakai clip_with_thumb kalau burn berhasil, fallback ke clip original.
+        clip_for_yt = clip_with_thumb if clip_with_thumb and pathlib.Path(clip_with_thumb).exists() else clip
+        if clip_for_yt != clip:
+            log(f"[seg{i}] PHASE 5: pakai clip_with_thumb (burned thumb) -> {pathlib.Path(clip_for_yt).name}")
+        else:
+            log(f"[seg{i}] PHASE 5: pakai clip original (no burned thumb)")
         video_id_yt = None
         try:
-            video_id_yt = upload_video(clip, title, desc)
+            video_id_yt = upload_video(clip_for_yt, title, desc)
             log(f"[seg{i}] PHASE 5: OK uploaded video_id_yt={video_id_yt}")
             try:
                 save_uploaded(video_id_yt, video_id, title, str(thumb) if thumb else None)
@@ -1609,8 +1720,16 @@ def _run_pipeline_impl(video_id):
 
         # PHASE 6: Cross-post Meta (FB Reels + IG Reels)
         log(f"[seg{i}] PHASE 6/6: CROSS-POST Meta (FB Reels + IG Reels)")
+        # Pakai clip_with_thumb kalau burn berhasil (first frame = thumbnail),
+        # fallback ke clip original. FB/IG upload dari path ini. IG pakai FB
+        # hosted URL (CDN), jadi burn di clip lokal akan sampai ke IG via FB.
+        clip_to_post = clip_with_thumb if clip_with_thumb and pathlib.Path(clip_with_thumb).exists() else clip
+        if clip_to_post != clip:
+            log(f"[seg{i}] PHASE 6: pakai clip_with_thumb (burned thumb) -> {pathlib.Path(clip_to_post).name}")
+        else:
+            log(f"[seg{i}] PHASE 6: pakai clip original (no burned thumb)")
         try:
-            result = cross_post_meta(clip, title, desc, thumb_path=str(thumb) if thumb and pathlib.Path(thumb).exists() else None)
+            result = cross_post_meta(clip_to_post, title, desc, thumb_path=str(thumb) if thumb and pathlib.Path(thumb).exists() else None)
             if result:
                 log(f"[seg{i}] PHASE 6: OK cross-post fb={result.get('fb')} ig={result.get('ig')} fb_thumb_ok={result.get('fb_thumb_ok')}")
             else:
