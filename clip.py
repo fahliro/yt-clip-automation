@@ -1410,14 +1410,22 @@ def burn_thumb_into_clip(clip_path, thumb_path, idx, hold_seconds=1.0):
         # di-hold `hold_seconds`. Video asli di-trim 0..(clip_dur-hold) untuk
         # total durasi tetap ~clip_dur. Lalu concat (still + video).
         # NOTE: pakai [v0] untuk still, [v1] untuk trimmed video.
+        # setsar=1 di akhir kedua chain untuk PAKSA SAR identik sebelum concat.
+        # Tanpa ini, clip dari cut_span() kadang punya SAR non-standar
+        # (mis. SAR 10240:10239 dari YouTube source) → concat error:
+        # "Input link parameters (SAR X) do not match output link (SAR 1:1)".
+        # setsar=1 idempotent: kalau sudah 1:1, no-op. Verified 2026-09-04
+        # setelah run #33829343573 gagal di CI clip oPebITjEjGs.
         fc = (
             f"[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
             f"crop=1080:1920,format=yuv420p,"
             f"fps=30,setpts=PTS-STARTPTS,"
-            f"trim=duration={hold_seconds},setpts=PTS-STARTPTS[v0];"
+            f"trim=duration={hold_seconds},setpts=PTS-STARTPTS,"
+            f"setsar=1[v0];"
             f"[1:v]trim=start={hold_seconds},setpts=PTS-STARTPTS,"
             f"scale=1080:1920:force_original_aspect_ratio=increase,"
-            f"crop=1080:1920,format=yuv420p[v1];"
+            f"crop=1080:1920,format=yuv420p,"
+            f"setsar=1[v1];"
             f"[v0][v1]concat=n=2:v=1:a=0[outv]"
         )
         # Audio: trim offset `hold_seconds` dari clip asli (skip 1 detik awal)
