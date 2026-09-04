@@ -10,11 +10,11 @@ on:
         required: false
 
 permissions:
-  contents: write   # buat simpan state.json (anti double-clip)
+  contents: write
 
 jobs:
   clip:
-    environment: YT_CHANNEL_ID   # secret disimpan di Environment ini
+    environment: YT_CHANNEL_ID
     runs-on: ubuntu-latest
     timeout-minutes: 300
     steps:
@@ -23,28 +23,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
+
+      - name: Cache Playwright Browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('requirements.txt') }}
 
       - name: Install deps
         run: |
-          python -m pip install -U pip
-          # playwright postinstall auto-downloads chromium via fetch — bisa crash
-          # di runner (TypeError: fetch failed). Disable auto-download; kita
-          # download binary terpisah di bawah dengan error-handling eksplisit.
-          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 pip install -r requirements.txt
-          node --version
-          # Install Noto Color Emoji font (untuk emoticon berwarna di thumbnail).
-          # apt-get butuh sudo di runner Ubuntu — install via fontconfig download.
-          mkdir -p /usr/share/fonts/truetype/noto
-          wget -q "https://github.com/googlefonts/noto-emoji/raw/main/fonts/NotoColorEmoji.ttf" \
-            -O /usr/share/fonts/truetype/noto/NotoColorEmoji.ttf || \
-            echo "WARN: gagal download Noto Color Emoji, fallback ke monokrom"
-          fc-cache -f || true
-          # Install Playwright Chromium untuk HTML+CSS thumbnail renderer.
-          # Tambah ~120MB ke runner, tapi reliable untuk Twemoji SVG + Google Fonts.
-          # PENTING: jangan pakai --with-deps karena apt-get crash di GitHub runner (TypeError: fetch failed).
-          # Download binary aja — system deps (libnss3, libatk1.0, dll) sudah ada di ubuntu-latest runner.
-          python -m playwright install chromium 2>&1 | tail -5 || \
-            echo "WARN: gagal install Chromium, thumbnail fallback ke PIL"
+          python -m pip install -U pip uv
+          uv pip install --system -r requirements.txt
+          python -m playwright install chromium
 
       - name: Setup ffmpeg
         uses: FedericoCarboni/setup-ffmpeg@v3
@@ -72,7 +63,6 @@ jobs:
 
       - name: Download raw + clip + upload
         env:
-          # video_id: dari dispatch (WebSub) ATAU manual input, ATAU poll terbaru
           VIDEO_ID: ${{ github.event.client_payload.video_id || github.event.inputs.video_id }}
           YT_CHANNEL_ID: ${{ secrets.YT_CHANNEL_ID }}
           YT_COOKIES_TXT: ${{ secrets.YT_COOKIES_TXT }}
@@ -85,11 +75,7 @@ jobs:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
-          STATE_FILE: ${{ github.workspace }}/state.json
-          # Cross-post Meta (FB Reels + IG Reels)
-          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
-          META_FB_PAGE_ID: ${{ secrets.META_FB_PAGE_ID }}
-          META_IG_USER_ID: ${{ secrets.META_IG_USER_ID }}
+          STATE_FILE: state.json
         run: python clip.py
 
       - name: Save state (anti double-clip)
