@@ -1,44 +1,6 @@
 {
-  "done": [
-    "00gPa_8dx6E"
-  ],
+  "done": [],
   "uploaded": {},
-  "failed": [
-    {
-      "id": "oPebITjEjGs",
-      "reason": "all_segments_upload_skipped",
-      "ts": "2026-09-03T19:00:00.874014"
-    },
-    {
-      "id": "9212xOcEYdc",
-      "reason": "all_segments_upload_skipped",
-      "ts": "2026-09-03T19:14:39.445143"
-    },
-    {
-      "id": "rVAPZV0t3Y8",
-      "reason": "all_segments_upload_skipped",
-      "ts": "2026-09-03T19:18:51.066434"
-    },
-    {
-      "id": "mTIXUZZJcyU",
-      "reason": "all_segments_upload_skipped",
-      "ts": "2026-09-03T19:22:16.655440"
-    },
-    {
-      "id": "PmgjSABDcIU",
-      "reason": "all_segments_upload_skipped",
-      "ts": "2026-09-03T19:59:49.756520"
-    },
-    {
-      "id": "YVLYNuhKZpc",
-      "reason": "all_segments_upload_skipped",
-      "ts": "2026-09-03T22:56:41.466996"
-    },
-    {
-      "id": "s8WiW9wcVwI",
-      "reason": "all_segments_upload_skipped",
-      "ts": "2026-09-03T23:11:23.596063"
-    }
-  ],
+  "failed": [],
   "processing": {}
 }
