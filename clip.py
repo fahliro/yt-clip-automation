@@ -15,9 +15,9 @@ Flow:
 
 ENV wajib (GitHub Secrets / Actions variables):
   VIDEO_ID, YT_CHANNEL_ID, YT_DL_OAUTH_JSON, YT_UPLOAD_CLIENT, YT_UPLOAD_SECRET,
-  YT_UPLOAD_TOKEN, GROQ_API_KEY, LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, STATE_FILE
+  YT_UPLOAD_TOKEN, GROQ_API_KEY, LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 """
-import os, json, subprocess, sys, tempfile, re, pathlib, datetime
+import os, json, subprocess, sys, tempfile, re, pathlib
 import requests
 
 WORKDIR = pathlib.Path(tempfile.gettempdir()) / "yt_clip"
@@ -1065,6 +1065,17 @@ def upload_video(path, title, description, append_flag=True):
 
 
 # ---------------------------------------------------------------- STATE
+# Anti-duplicate state.json (already_done / mark_done / save_uploaded /
+# mark_failed / _acquire_lock / _release_lock) sudah DIHAPUS 2026-09-04.
+# Pipeline sekarang full percaya pada RAW_FLAG yang di-append ke description
+# Short hasil upload (lihat upload_video append_flag=True). Setiap run cek
+# flag via YT Data API di PHASE 0b — kalau flagged, SKIP langsung.
+#
+# Risiko kalau YT API down saat WebSub fire: pipeline tidak bisa baca flag →
+# fallback ke "lanjut proses" → bisa duplicate upload. Trade-off yang
+# user pilih untuk simplify logic (lihat session 2026-09-04).
+
+
 def has_processed_flag(description):
     """Return True kalau description mengandung RAW_FLAG (sudah pernah di-clip).
 
@@ -1089,10 +1100,9 @@ def get_video_description(video_id):
 
     Raises:
       Nothing — semua error di-swallow jadi None (caller treat as "tidak
-      bisa dicek, lanjut proses"). Kita sengaja begini: kalau API down,
-      pipeline jalan (clip normal) daripada stuck total. Bandingkan dengan
-      anti-duplicate state.json yang kalau state korup juga return False
-      (lihat already_done line ~1050).
+      bisa dicek, lanjut proses"). Setelah remove state.json backup
+      (commit follow-up 2026-09-04), kalau YT API down pipeline akan
+     lanjut clip (tidak ada fallback layer lain). Trade-off yang user pilih.
     """
     import requests as _req
     try:
@@ -1126,132 +1136,6 @@ def get_video_description(video_id):
     except Exception as e:
         log(f"[desc-check] error: {e}")
         return None
-
-
-def already_done(video_id):
-    """Skip kalau video_id sudah pernah diproses (raw ATAU short).
-
-    Penting: cek juga uploaded{} keys (short IDs) biar upload Shorts ke channel
-    sendiri tidak men-trigger re-clip dirinya sendiri via WebSub.
-    Tanpa ini, setiap Short yang baru di-publish akan dispatch workflow sekali
-    lagi untuk clip dirinya sendiri (download + Whisper + LLM + upload).
-
-    Tambahan:
-      - failed{}    : raw IDs yang gagal permanen → skip agar gak retry forever
-      - processing{}: in-flight lock (raw → timestamp saat run mulai).
-                     Skip kalau run paralel untuk video yang sama.
-    """
-    sf = pathlib.Path(os.environ.get("STATE_FILE", "state.json"))
-    if not sf.exists():
-        return False
-    try:
-        data = json.loads(sf.read_text())
-    except (json.JSONDecodeError, OSError):
-        # State korup / gak bisa dibaca -> anggap belum diproses (False).
-        # Aman: clip akan jalan, lalu state ditimpa oleh mark_done().
-        return False
-    # Block raw IDs yang sudah diproses
-    if video_id in set(data.get("done", [])):
-        return True
-    # Block juga short IDs yang sudah di-upload (mapping raw -> short di uploaded{})
-    if video_id in data.get("uploaded", {}):
-        return True
-    # Block raw IDs yang pernah gagal permanen (sudah di-flag di failed{}).
-    # failed[] berisi list of dicts {"id": "...", "reason": "...", "ts": "..."}
-    # jadi cek .get("id") untuk setiap entry, bukan `video_id in failed[]` (yang cmpp string vs dict).
-    failed_ids = set()
-    for f in data.get("failed", []):
-        if isinstance(f, dict):
-            failed_ids.add(f.get("id"))
-        elif isinstance(f, str):
-            failed_ids.add(f)
-    if video_id in failed_ids:
-        return True
-    # In-flight lock: skip kalau video_id sedang diproses oleh run lain.
-    # Lock TTL 30 menit — kalau run sebelumnya crash/gak cleanup, lock stale
-    # dan run baru akan overwrite (lihat _acquire_lock).
-    proc = data.get("processing", {})
-    if video_id in proc:
-        ts = proc[video_id]
-        try:
-            age = (datetime.datetime.now() - datetime.datetime.fromisoformat(ts)).total_seconds()
-        except Exception:
-            age = 0
-        if age < 1800:  # 30 menit
-            return True
-    return False
-
-
-def _acquire_lock(video_id):
-    """Catat video_id sebagai 'processing' (in-flight lock) di state.json.
-    Return False kalau lock masih hidup (run lain sedang proses).
-    Dipanggil di awal main() SEBELUM already_done final."""
-    sf = pathlib.Path(os.environ.get("STATE_FILE", "state.json"))
-    data = json.loads(sf.read_text()) if sf.exists() else {
-        "done": [], "uploaded": {}, "failed": [], "processing": {}}
-    proc = data.setdefault("processing", {})
-    # Bersihkan lock stale (>30 menit) — anggap run sebelumnya crash.
-    now = datetime.datetime.now()
-    stale = []
-    for k, ts in proc.items():
-        try:
-            if (now - datetime.datetime.fromisoformat(ts)).total_seconds() > 1800:
-                stale.append(k)
-        except Exception:
-            stale.append(k)
-    for k in stale:
-        proc.pop(k, None)
-    if video_id in proc:
-        return False
-    proc[video_id] = now.isoformat()
-    sf.write_text(json.dumps(data, indent=2))
-    return True
-
-
-def _release_lock(video_id):
-    """Hapus entry processing untuk video_id (cleanup di akhir main())."""
-    sf = pathlib.Path(os.environ.get("STATE_FILE", "state.json"))
-    if not sf.exists():
-        return
-    try:
-        data = json.loads(sf.read_text())
-    except (json.JSONDecodeError, OSError):
-        return
-    proc = data.get("processing", {})
-    proc.pop(video_id, None)
-    sf.write_text(json.dumps(data, indent=2))
-
-
-def mark_done(video_id):
-    sf = pathlib.Path(os.environ.get("STATE_FILE", "state.json"))
-    data = json.loads(sf.read_text()) if sf.exists() else {
-        "done": [], "uploaded": {}, "failed": [], "processing": {}}
-    if video_id not in data["done"]:
-        data["done"].append(video_id)
-    sf.write_text(json.dumps(data, indent=2))
-
-
-def mark_failed(video_id, reason=""):
-    """Catat raw ID sebagai gagal permanen (mis. limit harian YT).
-    Next run sudah_done() akan return True sehingga gak retry forever."""
-    sf = pathlib.Path(os.environ.get("STATE_FILE", "state.json"))
-    data = json.loads(sf.read_text()) if sf.exists() else {
-        "done": [], "uploaded": {}, "failed": [], "processing": {}}
-    failed = data.setdefault("failed", [])
-    if video_id not in failed:
-        failed.append({"id": video_id, "reason": reason,
-                       "ts": datetime.datetime.now().isoformat()})
-    sf.write_text(json.dumps(data, indent=2))
-
-
-def save_uploaded(youtube_id, raw_video_id, title, thumb_path):
-    """Track uploaded Shorts di state.json biar bisa di-retry kalau ada error."""
-    sf = pathlib.Path(os.environ.get("STATE_FILE", "state.json"))
-    data = json.loads(sf.read_text()) if sf.exists() else {"done": [], "uploaded": {}}
-    data.setdefault("uploaded", {})[youtube_id] = {
-        "raw": raw_video_id, "title": title, "thumb": str(thumb_path) if thumb_path else None,
-        "ts": datetime.datetime.now().isoformat()}
-    sf.write_text(json.dumps(data, indent=2))
 
 
 # ---------------------------------------------------------------- 5b. META UPLOAD
@@ -1627,45 +1511,28 @@ def main():
     else:
         log(f"VIDEO_ID = {video_id}")
 
-    if already_done(video_id):
-        log("PHASE 0: video sudah pernah di-clip (state.json match) -> SKIP")
-        return
-
-    # PHASE 0b: Cek description video via YT API SEBELUM download/transcribe.
-    # Kalau description mengandung RAW_FLAG, video ini adalah Short yang
-    # sudah pernah di-clip dan di-upload oleh pipeline ini sendiri → SKIP.
-    # Tanpa cek ini, Short yang baru di-publish akan trigger WebSub →
-    # download (boros bandwidth) → infinite loop sampai quota habis.
-    #
-    # Returns None kalau video private/deleted (rare untuk Short published)
-    # atau API error (network, quota). Kalau None → lanjut proses (graceful
-    # fallback; sama konservatif dengan state.json corrupt).
-    log(f"PHASE 0b: cek description video_id={video_id} via YT API (flag='{RAW_FLAG}')")
+    # PHASE 0: Cek description video via YT API SEBELUM download/transcribe.
+    # Kalau description mengandung flag → SKIP (sudah pernah di-clip).
+    # State.json anti-duplicate sudah dihapus (commit follow-up 2026-09-04)
+    # — pipeline full percaya pada flag di description. Trade-off: kalau
+    # YT API down saat WebSub fire, pipeline tidak bisa baca flag → fallback
+    # ke "lanjut proses" → bisa duplicate upload. Risiko dipilih user.
+    log(f"PHASE 0: cek description video_id={video_id} via YT API (flag='{RAW_FLAG}')")
     desc = get_video_description(video_id)
     if desc is not None and has_processed_flag(desc):
-        log(f"PHASE 0b: description mengandung '{RAW_FLAG}' -> SKIP (sudah pernah di-clip)")
+        log(f"PHASE 0: description mengandung '{RAW_FLAG}' -> SKIP (sudah pernah di-clip)")
         return
     elif desc is not None:
-        log(f"PHASE 0b: description tanpa flag -> lanjut proses (raw upload atau Short manual)")
+        log(f"PHASE 0: description tanpa flag -> lanjut proses (raw upload atau Short manual)")
     else:
-        log(f"PHASE 0b: API return None (video not found / private / API error) -> lanjut proses (fallback)")
+        log(f"PHASE 0: API return None (video not found / private / API error) -> lanjut proses (fallback)")
 
-    # Acquire in-flight lock SEBELUM pipeline jalan. Kalau run lain sedang proses
-    # video yang sama (WebSub duplicate), lock masih hidup → skip. Kalau lock
-    # stale (>30 menit) → auto-replace. Cleanup di finally (lihat akhir main).
-    if not _acquire_lock(video_id):
-        log(f"PHASE 0: video_id={video_id} sedang diproses run lain (in-flight lock) -> SKIP")
-        return
-
-    try:
-        return _run_pipeline(video_id)
-    finally:
-        _release_lock(video_id)
+    return _run_pipeline(video_id)
 
 
 def _run_pipeline(video_id):
-    # Wrapper untuk pipeline utama — pisah dari main() supaya lock
-    # bisa di-release di finally regardless of crash.
+    # Wrapper untuk pipeline utama — langsung call impl tanpa lock
+    # management (state.json sudah dihapus 2026-09-04).
     return _run_pipeline_impl(video_id)
 
 
@@ -1737,7 +1604,8 @@ def _run_pipeline_impl(video_id):
         except Exception as e:
             # LLM gagal total -> SKIP segment ini (no fallback template English).
             # Lanjut ke segment berikutnya. Artifact clip tetap di WORKDIR.
-            # Run berikutnya akan retry kalau raw belum di-mark_done.
+            # TIDAK ada state.json retry logic sejak remove 2026-09-04 — kalau
+            # raw perlu di-clip ulang, trigger manual via workflow_dispatch.
             _log_trace(e, f"[seg{i}-title] ")
             log(f"[seg{i}] PHASE 4b: GAGAL -> SKIP segment (no fallback, no English output)")
             upload_errors += 1
@@ -1810,10 +1678,9 @@ def _run_pipeline_impl(video_id):
         try:
             video_id_yt = upload_video(clip_for_yt, title, desc)
             log(f"[seg{i}] PHASE 5: OK uploaded video_id_yt={video_id_yt}")
-            try:
-                save_uploaded(video_id_yt, video_id, title, str(thumb) if thumb else None)
-            except Exception as e:
-                _log_trace(e, f"[seg{i}-save-uploaded] ")
+            # save_uploaded() sudah dihapus 2026-09-04 — tidak ada state.json
+            # tracking lagi. Anti-duplicate full percaya pada RAW_FLAG yang
+            # sudah di-append ke description di upload_video().
         except requests.HTTPError as e:
             # Build body safely. HTTPError's .response can be None for some
             # network errors; fall back to empty string and check error str
@@ -1882,18 +1749,16 @@ def _run_pipeline_impl(video_id):
     log(f"FINAL: {total_segs} segment diproses, {upload_errors} upload error")
     log("=" * 60)
 
+    # mark_done() / mark_failed() sudah dihapus 2026-09-04 (no state.json).
+    # Kalau upload semua gagal (mis. limit harian YT), pipeline selesai
+    # tanpa retry logic otomatis — user run workflow_dispatch manual dengan
+    # VIDEO_ID input untuk retry.
     if upload_errors and upload_errors == total_segs:
-        # Semua upload (mis. limit harian YT) → jangan mark_done biar besok retry.
-        # Tapi catat ke 'failed' agar sistem tahu ini pernah dicoba.
-        # Retry manual: workflow_dispatch → VIDEO_ID input.
-        log("SELESAI (semua upload di-skip/quota, TIDAK di-mark_done → bisa retry manual)")
-        mark_failed(video_id, reason="all_segments_upload_skipped")
+        log("SELESAI (semua upload di-skip/quota) → retry manual via workflow_dispatch")
+    elif upload_errors:
+        log(f"SELESAI (partial: {total_segs - upload_errors}/{total_segs} segment OK)")
     else:
-        mark_done(video_id)
-        if upload_errors:
-            log(f"SELESAI (partial: {total_segs - upload_errors}/{total_segs} segment OK)")
-        else:
-            log("SELESAI")
+        log("SELESAI")
 
 
 if __name__ == "__main__":
