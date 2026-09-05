@@ -76,6 +76,9 @@ jobs:
           LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
           STATE_FILE: state.json
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          META_FB_PAGE_ID: ${{ secrets.META_FB_PAGE_ID }}
+          META_IG_USER_ID: ${{ secrets.META_IG_USER_ID }}
         run: python clip.py
 
       - name: Save state (anti double-clip)
