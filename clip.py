@@ -1429,10 +1429,15 @@ def burn_thumb_into_clip(clip_path, thumb_path, idx, hold_seconds=1.0):
             f"setsar=1[v1];"
             f"[v0][v1]concat=n=2:v=1:a=0[outv]"
         )
-        # Audio: trim offset `hold_seconds` dari clip asli (skip 1 detik awal)
+        # Audio: trim offset `hold_seconds` dari clip asli (skip detik hold thumb)
         # lalu gabung. Kalau clip gak ada audio, skip mapping audio.
-        # Kita set -map 1:a? dengan filter aselect biar audio start setelah hold.
-        af = f"[1:a]asetpts=PTS-STARTPTS,atrim=start=0[outa]"
+        # BUG lama (fixed 2026-09-05): atrim=start=0 → audio jalan dari t=0,
+        # tapi video burned-thumbnail hold 1 detik pertama = still image.
+        # Hasil: audio audible saat video masih diam (desync 1 detik).
+        # Fix: atrim=start={hold_seconds} → audio mulai pas video asli jalan,
+        # pertama PTS ≈ hold_seconds (delay ~23ms dari AAC primer packet,
+        # imperceptible).
+        af = f"[1:a]asetpts=PTS-STARTPTS,atrim=start={hold_seconds}[outa]"
         # Pakai -t total durasi clip_dur eksplisit (hold + (clip_dur - hold) = clip_dur)
         # supaya predictable. Hindari -shortest karena audio bisa lebih pendek
         # kalau video asli di-trim dari hold_seconds.
