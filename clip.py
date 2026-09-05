@@ -27,6 +27,22 @@ SILENCE_GAP = 0.4      # detik; gap antar kata > ini = dianggap silence, dibuang
 DEFAULT_FILLERS = []   # kosong: kalau LLM gak specify fillers, jangan filter apa-apa
                        # LLM lebih paham mana filler natural vs substantive per konteks.
 MAX_CLIPS = 100        # cap videos.insert per hari
+# Flag penanda video SUDAH pernah di-clip. Dipasang di description Short hasil
+# upload, supaya saat WebSub push video_id Short baru ke pipeline, kita cek
+# deskripsi via YT API dulu (sebelum download + transcribe) → kalau mengandung
+# flag ini, SKIP. Tanpa ini, Short yang baru publish akan trigger re-clip
+# dirinya sendiri → infinite WebSub loop.
+#
+# Flag ini PENGGANTI anti-duplicate lama (state.json `done[]` + `uploaded{}`):
+#   - Anti-duplicate state.json rapuh kalau state hilang (CI runner fresh)
+#     atau kalau kita upload Short manual di YT Studio (ID gak masuk state)
+#   - Flag di description = ground truth di YouTube sendiri, gak bisa hilang
+#     selama Short masih exist. Reliable across re-runs / manual actions.
+#
+# Override via env RAW_FLAG untuk testing / migrate. Jangan pakai hashtag
+# generik (#shorts #viral) yang sering muncul di description — pakai string
+# unik seperti "#ngeEyAiYuk?" yang 99.999% gak akan pernah ditulis manual.
+RAW_FLAG = os.environ.get("RAW_FLAG", "#ngeEyAiYuk?")
 # ID test (hardcode buat debug lokal/CI manual). Prod: override via env VIDEO_ID / WebSub / poll.
 TEST_VIDEO_ID = "YVLYNuhKZpc"
 
@@ -966,8 +982,30 @@ def set_thumbnail(video_id, thumb_path):
 
 
 # ---------------------------------------------------------------- 5. UPLOAD
-def upload_video(path, title, description):
+def upload_video(path, title, description, append_flag=True):
+    """Upload video ke YouTube via Data API v3 (multipart upload).
+
+    Args:
+        path: path ke file video (mp4)
+        title: max 100 char
+        description: max 4900 char (YouTube limit)
+        append_flag: kalau True, append " " + RAW_FLAG ke description sebelum upload.
+                    Set False kalau upload raw video (no flag) atau untuk test.
+
+    Returns:
+        youtube video_id (str) kalau sukses.
+
+    Raises:
+        requests.HTTPError untuk non-transient errors. Caller handle.
+    """
     import requests, time
+    # Append flag di description supaya saat WebSub push video_id Short baru,
+    # pipeline bisa cek description via YT API dan skip kalau sudah ada flag.
+    # Flag di-prefix spasi agar tidak nempel di kata sebelumnya; RAW_FLAG
+    # sendiri sudah string unik (lihat RAW_FLAG docstring) jadi substring
+    # check di has_processed_flag() cukup.
+    if append_flag:
+        description = (description or "") + " " + RAW_FLAG
     tok = requests.post("https://oauth2.googleapis.com/token", data={
         "client_id": os.environ["YT_UPLOAD_CLIENT"],
         "client_secret": os.environ["YT_UPLOAD_SECRET"],
@@ -1027,6 +1065,69 @@ def upload_video(path, title, description):
 
 
 # ---------------------------------------------------------------- STATE
+def has_processed_flag(description):
+    """Return True kalau description mengandung RAW_FLAG (sudah pernah di-clip).
+
+    Cek substring case-sensitive di description. RAW_FLAG di-prefix spasi
+    (lihat upload_video yang append " " + RAW_FLAG) supaya gak nempel di
+    hashtag lain. Tapi di sini substring check aja cukup karena RAW_FLAG
+    sendiri string unik yang gak mungkin muncul natural.
+    """
+    if not description:
+        return False
+    return RAW_FLAG in description
+
+
+def get_video_description(video_id):
+    """Ambil description video YouTube via Data API v3.
+
+    Pakai endpoint yang SAMA dengan auth upload (oauth2 refresh_token,
+    YT_UPLOAD_TOKEN). Returns:
+      - str description kalau video exists & API call OK
+      - None kalau video not found (404 / private / deleted)
+      - None kalau API error lain (network, quota)
+
+    Raises:
+      Nothing — semua error di-swallow jadi None (caller treat as "tidak
+      bisa dicek, lanjut proses"). Kita sengaja begini: kalau API down,
+      pipeline jalan (clip normal) daripada stuck total. Bandingkan dengan
+      anti-duplicate state.json yang kalau state korup juga return False
+      (lihat already_done line ~1050).
+    """
+    import requests as _req
+    try:
+        tok = _req.post("https://oauth2.googleapis.com/token", data={
+            "client_id": os.environ["YT_UPLOAD_CLIENT"],
+            "client_secret": os.environ["YT_UPLOAD_SECRET"],
+            "refresh_token": os.environ["YT_UPLOAD_TOKEN"],
+            "grant_type": "refresh_token",
+        }).json()
+        access = tok.get("access_token")
+        if not access:
+            log(f"[desc-check] gagal dapat access token: {tok}")
+            return None
+        r = _req.get(
+            "https://www.googleapis.com/youtube/v3/videos",
+            params={"part": "snippet", "id": video_id},
+            headers={"Authorization": f"Bearer {access}"},
+            timeout=30,
+        )
+        if not r.ok:
+            log(f"[desc-check] HTTP {r.status_code} untuk id={video_id}: {r.text[:200]}")
+            return None
+        items = r.json().get("items", [])
+        if not items:
+            # Video not found / private / deleted → return None, caller SKIP via fallback
+            log(f"[desc-check] video_id={video_id} tidak ditemukan (private/deleted)")
+            return None
+        desc = items[0].get("snippet", {}).get("description", "")
+        log(f"[desc-check] id={video_id} desc_len={len(desc)} has_flag={has_processed_flag(desc)}")
+        return desc
+    except Exception as e:
+        log(f"[desc-check] error: {e}")
+        return None
+
+
 def already_done(video_id):
     """Skip kalau video_id sudah pernah diproses (raw ATAU short).
 
@@ -1529,6 +1630,25 @@ def main():
     if already_done(video_id):
         log("PHASE 0: video sudah pernah di-clip (state.json match) -> SKIP")
         return
+
+    # PHASE 0b: Cek description video via YT API SEBELUM download/transcribe.
+    # Kalau description mengandung RAW_FLAG, video ini adalah Short yang
+    # sudah pernah di-clip dan di-upload oleh pipeline ini sendiri → SKIP.
+    # Tanpa cek ini, Short yang baru di-publish akan trigger WebSub →
+    # download (boros bandwidth) → infinite loop sampai quota habis.
+    #
+    # Returns None kalau video private/deleted (rare untuk Short published)
+    # atau API error (network, quota). Kalau None → lanjut proses (graceful
+    # fallback; sama konservatif dengan state.json corrupt).
+    log(f"PHASE 0b: cek description video_id={video_id} via YT API (flag='{RAW_FLAG}')")
+    desc = get_video_description(video_id)
+    if desc is not None and has_processed_flag(desc):
+        log(f"PHASE 0b: description mengandung '{RAW_FLAG}' -> SKIP (sudah pernah di-clip)")
+        return
+    elif desc is not None:
+        log(f"PHASE 0b: description tanpa flag -> lanjut proses (raw upload atau Short manual)")
+    else:
+        log(f"PHASE 0b: API return None (video not found / private / API error) -> lanjut proses (fallback)")
 
     # Acquire in-flight lock SEBELUM pipeline jalan. Kalau run lain sedang proses
     # video yang sama (WebSub duplicate), lock masih hidup → skip. Kalau lock
