@@ -1420,6 +1420,14 @@ def burn_thumb_into_clip(clip_path, thumb_path, idx, hold_seconds=1.0):
         # "Input link parameters (SAR X) do not match output link (SAR 1:1)".
         # setsar=1 idempotent: kalau sudah 1:1, no-op. Verified 2026-09-04
         # setelah run #33829343573 gagal di CI clip oPebITjEjGs.
+        # NOTE PENTING (verified 2026-09-04, bug ditemukan dari user feedback):
+        # Chain [1:v] (video asli setelah burned-thumbnail hold_seconds) HARUS pakai
+        # filter yang SAMA dengan _extract_frames (line 727-732) dan cut_span (line 319-325)
+        # — yaitu split=2[vbg][vfg] + boxblur bg + overlay fg center. Tanpa itu,
+        # video di-crop full-bleed 1080x1920 dari landscape source = subjek terpotong
+        # kiri-kanan ("zoom in"), tidak match dengan thumbnail yang pakai fg+kecil+blur.
+        # Sebelumnya chain [1:v] cuma scale+crop tanpa overlay → subjek 100% fill canvas
+        # tapi pinggir hilang. Fix: pakai komposisi identik dengan thumbnail/cut_span.
         fc = (
             f"[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
             f"crop=1080:1920,format=yuv420p,"
@@ -1427,8 +1435,12 @@ def burn_thumb_into_clip(clip_path, thumb_path, idx, hold_seconds=1.0):
             f"trim=duration={hold_seconds},setpts=PTS-STARTPTS,"
             f"setsar=1[v0];"
             f"[1:v]trim=start={hold_seconds},setpts=PTS-STARTPTS,"
-            f"scale=1080:1920:force_original_aspect_ratio=increase,"
-            f"crop=1080:1920,format=yuv420p,"
+            f"split=2[vbg][vfg];"
+            f"[vbg]scale=1080:1920:force_original_aspect_ratio=increase,"
+            f"crop=1080:1920,boxblur=20[bg];"
+            f"[vfg]scale=1080:-1[fg_scaled];"
+            f"[fg_scaled]pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black[fg_padded];"
+            f"[bg][fg_padded]overlay=(W-w)/2:(H-h)/2,format=yuv420p,"
             f"setsar=1[v1];"
             f"[v0][v1]concat=n=2:v=1:a=0[outv]"
         )
